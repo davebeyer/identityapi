@@ -1,0 +1,15 @@
+{
+  "name": "lh-identity",
+  "version": "1.0.0",
+  "description": "Node server API module to Lighthouse user identity server",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/davebeyer/identitymodule.git"
+  },
+  "author": "Dave Beyer",
+  "license": "LicenseRef-LICENSE.md"
+}
