@@ -17,7 +17,7 @@ package.json dependencies like so:
 "lh-identity" : "https://github.com/davebeyer/identityapi.git"
 ```
 
-Or, run:
+Or:
 
 ```
 npm install https://github.com/davebeyer/identityapi.git
