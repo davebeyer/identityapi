@@ -14,13 +14,13 @@ While only available in private git repository, include in the list of
 package.json dependencies like so:
 
 ```
-"lh-identity" : "https://github.com/davebeyer/identitymodule.git"
+"lh-identity" : "https://github.com/davebeyer/identityapi.git"
 ```
 
 Or, run:
 
 ```
-npm install https://github.com/davebeyer/identitymodule.git
+npm install https://github.com/davebeyer/identityapi.git
 ```
 
 Notes
