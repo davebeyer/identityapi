@@ -12,7 +12,7 @@ PROJ_DIR=$FILE_DIR/..
 
 CMD="tsc --project ${PROJ_DIR} --watch"
 
-pkill -f ${CMD}
+pkill -f "${CMD}"
 
 (${CMD}  &)
 
