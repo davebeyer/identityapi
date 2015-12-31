@@ -24,21 +24,23 @@ passport.deserializeUser(function (obj, done) {
 // Lighthouse Session Manager
 //
 var LHSessionMgr = (function () {
-    function LHSessionMgr(appName, authConfig, options) {
+    function LHSessionMgr(appName, hostURL, authConfig, options) {
         var options = options || {};
         this.appName = appName;
+        this.hostURL = hostURL;
         this.authConfig = authConfig;
         this.klass = options.klass || "lh-identity";
-        this.hostURL = options.hostURL || "http://localhost:3000";
         this.authPath = options.authPath || "/auth";
         this.successPath = options.successPath || '/';
         this.failurePath = options.failurePath || this.authPath + '/signin';
         this.signinTmpl = swig_1.compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
+        // Bind the authorization function to this, so that when it's accessed by Express, 
+        // it has the right context
+        this.checkAuth = this._checkAuthFn.bind(this);
         var strategy;
-        var self = this;
         if (authConfig.facebook) {
             if (!authConfig.facebook.callbackURL) {
-                authConfig.facebook.callbackURL = this.hostURL + '/' + this.authPath + '/facebook/callback';
+                authConfig.facebook.callbackURL = this.hostURL + this.authPath + '/facebook/callback';
             }
             // For Facebook, need to specify profileFields to fetch.  First, create copy
             var fbAuthConfig = (JSON.parse(JSON.stringify(authConfig.facebook)));
@@ -49,7 +51,7 @@ var LHSessionMgr = (function () {
         }
         if (authConfig.google) {
             if (!authConfig.google.callbackURL) {
-                authConfig.google.callbackURL = this.hostURL + '/' + this.authPath + '/google/callback';
+                authConfig.google.callbackURL = this.hostURL + this.authPath + '/google/callback';
             }
             strategy = new GoogleStrategy(authConfig.google, this._handleAuthentication.bind(this));
             passport.use(strategy);
@@ -84,18 +86,11 @@ var LHSessionMgr = (function () {
         });
         return html;
     };
-    LHSessionMgr.prototype.isAuthorized = function (req, res, next) {
-        if (req.isAuthenticated()) {
-            console.log("Request is authenticated");
-            return next();
-        }
-        console.log("Request is NOT authenticated");
-        res.redirect(this.failurePath);
-    };
     // 
     // Private methods
     // 
     LHSessionMgr.prototype._registerRoutes = function (app, provider) {
+        var self = this;
         // GET /<authPath>/<provider>
         //   Use passport.authenticate() as route middleware to authenticate the
         //   request.  The first step in authentication will involve
@@ -103,17 +98,15 @@ var LHSessionMgr = (function () {
         //   redirect the user back to this application at /<authPath>/<provider>/callback
         //   (Note, this callback must be one of the valid callbacks for this Lighthouse
         //   Identity Server in the provider's application configuration security settings).
-        app.get(this._signinURL(provider), function (req, res) {
+        var authenticateFn;
+        if (provider === 'google') {
             // Special case for Google
-            if (provider === 'google') {
-                console.log("Google signin for", provider);
-                passport.authenticate(provider, { scope: ['openid email profile'] });
-            }
-            else {
-                console.log("In other signin for", provider);
-                passport.authenticate(provider);
-            }
-        }, function (req, res) {
+            authenticateFn = passport.authenticate(provider, { scope: ['openid email profile'] });
+        }
+        else {
+            authenticateFn = passport.authenticate(provider);
+        }
+        app.get(self._signinURL(provider), authenticateFn, function (req, res) {
             console.log("In signin redirect !?");
             // The request will be redirected to the provider for authentication, 
             // so this function will not be called.
@@ -123,15 +116,23 @@ var LHSessionMgr = (function () {
         //   request.  If authentication fails, the user will be redirected back to the
         //   sign in page.  Otherwise, the primary route function function will be called,
         //   which, in this example, will redirect the user to the home page.
-        app.get(this._callbackURL(provider), passport.authenticate(provider, { failureRedirect: this.failurePath }), function (req, res) {
-            console.log("Successful authentication!");
-            res.redirect(this.successPath);
+        var callbackAuthFn = passport.authenticate(provider, { failureRedirect: self.failurePath });
+        app.get(self._callbackURL(provider), function (req, res, next) {
+            console.log("Authenticating callback");
+            return callbackAuthFn(req, res, next);
+        }, function (req, res) {
+            console.log("Successful authentication!, redirecting", self.successPath);
+            res.redirect(self.successPath);
         });
     };
     ;
     LHSessionMgr.prototype._handleAuthentication = function (accessToken, refreshToken, profile, done) {
         // asynchronous verification, for effect...
         process.nextTick(function () {
+            // Special case for google (passport-google plugin is apparently missing this)
+            if (!profile.profileUrl && profile._json.url) {
+                profile.profileUrl = profile._json.url;
+            }
             console.log("Successfully Authenticated", profile);
             // To keep the example simple, the user's profile is returned to
             // represent the logged-in user.  In a typical application, you would want
@@ -145,6 +146,14 @@ var LHSessionMgr = (function () {
     };
     LHSessionMgr.prototype._callbackURL = function (provider) {
         return this.authPath + '/' + provider + '/callback';
+    };
+    LHSessionMgr.prototype._checkAuthFn = function (req, res, next) {
+        if (req.isAuthenticated()) {
+            console.log("Request is authenticated");
+            return next();
+        }
+        console.log("Request is NOT authenticated");
+        res.redirect(this.failurePath);
     };
     return LHSessionMgr;
 })();
