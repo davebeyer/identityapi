@@ -1,0 +1,19 @@
+#
+# Determine the project directory
+#
+
+FILE_DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+
+PROJ_DIR=$FILE_DIR/..
+
+#
+# Watch for ts files to compile (Killing existing process if necessary)
+#
+
+CMD="tsc --project ${PROJ_DIR} --watch"
+
+pkill -f ${CMD}
+
+(${CMD}  &)
+
+
