@@ -4,5 +4,9 @@
   "ref": "master",
   "path": "typings",
   "bundle": "typings/tsd.d.ts",
-  "installed": {}
+  "installed": {
+    "swig/swig.d.ts": {
+      "commit": "dc9dabe74a5be62613b17a3605309783a12ff28a"
+    }
+  }
 }

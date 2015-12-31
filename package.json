@@ -12,7 +12,7 @@
     "url": "https://github.com/davebeyer/identityapi.git"
   },
   "author": "Dave Beyer",
-  "license": "SEE LICENSE IN LICENSE.md",
+  "license": "SEE LICENSE IN LICENSE.txt",
   "dependencies": {
     "swig": "^1.4.2"
   }
