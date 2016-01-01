@@ -15,10 +15,14 @@ var path = require('path');
 //   and deserialized.
 //
 passport.serializeUser(function (user, done) {
+    // TODO: return the user's LH id given the LH user profile info
+    // E.g., done(null, user.id)
     done(null, user);
 });
-passport.deserializeUser(function (obj, done) {
-    done(null, obj);
+passport.deserializeUser(function (userObj, done) {
+    // TODO: return the user's LH profile info given the userId
+    // E.g., DB.GetUser(userId, function(user) { done(null, userInfo); })
+    done(null, userObj);
 });
 //
 // Lighthouse Session Manager
@@ -34,9 +38,6 @@ var LHSessionMgr = (function () {
         this.successPath = options.successPath || '/';
         this.failurePath = options.failurePath || this.authPath + '/signin';
         this.signinTmpl = swig_1.compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
-        // Bind the authorization function to this, so that when it's accessed by Express, 
-        // it has the right context
-        this.checkAuth = this._checkAuthFn.bind(this);
         var strategy;
         if (authConfig.facebook) {
             if (!authConfig.facebook.callbackURL) {
@@ -85,6 +86,13 @@ var LHSessionMgr = (function () {
             signinGoogle: this.authConfig.google ? this._signinURL('google') : ''
         });
         return html;
+    };
+    LHSessionMgr.prototype.currentUserId = function (req) {
+        if (req.isAuthenticated()) {
+            // TODO: is this the proper way?
+            return req['user'].id;
+        }
+        return null;
     };
     // 
     // Private methods
@@ -146,14 +154,6 @@ var LHSessionMgr = (function () {
     };
     LHSessionMgr.prototype._callbackURL = function (provider) {
         return this.authPath + '/' + provider + '/callback';
-    };
-    LHSessionMgr.prototype._checkAuthFn = function (req, res, next) {
-        if (req.isAuthenticated()) {
-            console.log("Request is authenticated");
-            return next();
-        }
-        console.log("Request is NOT authenticated");
-        res.redirect(this.failurePath);
     };
     return LHSessionMgr;
 })();

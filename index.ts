@@ -19,11 +19,15 @@ var path             = require('path');
 //
 
 passport.serializeUser(function(user, done) {
-  done(null, user);
+    // TODO: return the user's LH id given the LH user profile info
+    // E.g., done(null, user.id)
+    done(null, user);
 });
 
-passport.deserializeUser(function(obj, done) {
-  done(null, obj);
+passport.deserializeUser(function(userObj, done) {
+    // TODO: return the user's LH profile info given the userId
+    // E.g., DB.GetUser(userId, function(user) { done(null, userInfo); })
+    done(null, userObj);
 });
 
 //
@@ -42,8 +46,6 @@ export class LHSessionMgr {
     successPath : string;
     failurePath : string;
 
-    checkAuth   : any;
-
     constructor(appName : string, hostURL : string, authConfig : any, options? : any) {
         var options = options || {};
 
@@ -57,10 +59,6 @@ export class LHSessionMgr {
 	this.failurePath = options.failurePath || this.authPath + '/signin';
 
         this.signinTmpl = compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
-
-	// Bind the authorization function to this, so that when it's accessed by Express, 
-	// it has the right context
-	this.checkAuth  = this._checkAuthFn.bind(this);
 
 	var strategy;
 
@@ -131,6 +129,15 @@ export class LHSessionMgr {
         });
         return html;
     }
+
+    currentUserId(req) : boolean {
+	if (req.isAuthenticated()) {
+	    // TODO: is this the proper way?
+	    return req['user'].id;
+	}
+	return null;
+    }
+
 
     // 
     // Private methods
@@ -208,15 +215,6 @@ export class LHSessionMgr {
 
     _callbackURL(provider) {
 	return this.authPath + '/' + provider + '/callback';
-    }
-
-    _checkAuthFn(req, res, next) {
-	if (req.isAuthenticated()) {
-	    console.log("Request is authenticated");
-	    return next();
-	}
-	console.log("Request is NOT authenticated");
-	res.redirect(this.failurePath);
     }
 
 }
