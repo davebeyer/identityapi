@@ -1,6 +1,8 @@
 /// <reference path="./typings/tsd.d.ts" />
 import {compileFile} from 'swig';
 
+var r                = require('rethinkdb');
+
 var passport         = require('passport');
 var session          = require('express-session');
 var FacebookStrategy = require('passport-facebook').Strategy;
@@ -46,6 +48,9 @@ export class LHSessionMgr {
     successPath : string;
     failurePath : string;
 
+    dbPort      : number;
+    dbHost      : string;
+
     constructor(appName : string, hostURL : string, authConfig : any, options? : any) {
         var options = options || {};
 
@@ -57,6 +62,13 @@ export class LHSessionMgr {
 	this.authPath    = options.authPath   || "/auth";
 	this.successPath = options.successPath || '/';
 	this.failurePath = options.failurePath || this.authPath + '/signin';
+
+	this.dbHost      = options.dbHost      || 'localhost';
+	this.dbPort      = options.dbPort      || 28035;
+
+	if (options.initDatabase) {
+	    this.initDB();
+	}
 
         this.signinTmpl = compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
 
@@ -71,7 +83,7 @@ export class LHSessionMgr {
 	    var fbAuthConfig = (JSON.parse(JSON.stringify(authConfig.facebook)));
 
 	    // Then add profileFields
-	    fbAuthConfig.profileFields = ["id", "name", "displayName", "photos", "profileUrl", "emails", "gender"];
+	    fbAuthConfig.profileFields = ["id", "name", "displayName", "photos", "profileUrl", "email", "gender"];
 
 	    strategy = new FacebookStrategy(
 		fbAuthConfig,
@@ -138,6 +150,71 @@ export class LHSessionMgr {
 	return null;
     }
 
+    initDB() {
+	console.log("initDB: About to connect");
+
+	r.connect( {host: this.dbHost, port: this.dbPort} ).then(function(conn) {
+	    console.log("initDB: About to create UserIdentities");
+
+	    r.dbCreate("UserIdentities").run(conn).finally(function() {
+		// Switch to the UserIdenties database
+		conn.use("UserIdentities");
+
+		console.log("initDB: About to create globals table");
+		return r.tableCreate('globals').run(conn);
+
+	    }).finally(function() {
+		console.log("initDB: About to insert userCount into globals table");
+		return r.table('globals').insert({
+		    id    : 'userCount',
+		    value : 100
+		}).run(conn);
+
+	    }).finally(function() {
+		console.log("initDB: About to create users table");
+		return r.tableCreate('users').run(conn);
+
+	    }).finally(function() {
+		console.log("initDB: About to insert dummy user");
+		return r.table('users').insert({
+		    id           : 99,
+		    created      : new Date(),
+		    providers    : [{
+			provider     : 'lighthouse',
+			providerId   : 99, // Lighthouse dummy userId
+			username     : 'dummy@example.com',
+			passwordHash : null,
+			emails       : ['dummy@example.com'],
+			displayName  : 'Dummy User',
+			name         : {
+			    familyName : 'User',
+			    givenName  : 'Dummy',
+			    middleName : null
+			},
+			gender      : 'other',
+			photos      : [],
+			profileUrl  : ''
+		    }]
+		}).run(conn);
+
+	    }).finally(function() {
+		console.log("initDB: About to create emailIndex");
+		return r.table('users').indexCreate('emailIndex', r.row('providers')('emails'), 
+						    {multi: true}).run(conn);
+					     
+	    }).finally(function() {
+		console.log("initDB: About to wait for emailIndex");
+		return r.table('users').indexWait('emailIndex').run(conn);
+
+	    }).finally(function() {
+		console.log("initDB: Done!");
+	    });
+
+	}).error(function(err) {
+	    console.error("initDB: Could not open connection to the database", this.dbHost, this.dbPort);
+	    process.exit();
+	});
+    }
 
     // 
     // Private methods
@@ -160,7 +237,8 @@ export class LHSessionMgr {
 	    // Special case for Google
 	    authenticateFn = passport.authenticate(provider, { scope: ['openid email profile'] });
 	} else {
-	    authenticateFn = passport.authenticate(provider);
+	    // authenticateFn = passport.authenticate(provider);
+	    authenticateFn = passport.authenticate(provider, { scope: ['email'] });
 	}
 
 	app.get(self._signinURL(provider), 
@@ -200,6 +278,9 @@ export class LHSessionMgr {
             }
 
 	    console.log("Successfully Authenticated" , profile);
+
+	    // Look up this user in the database.  If not found, try to find a 
+	    // matching user (only by email for now), and if not found, 
 
 	    // To keep the example simple, the user's profile is returned to
 	    // represent the logged-in user.  In a typical application, you would want
