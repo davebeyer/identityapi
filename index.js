@@ -1,34 +1,17 @@
 /// <reference path="./typings/tsd.d.ts" />
 var swig_1 = require('swig');
+var FIRST_USERID = 100;
 var passport = require('passport');
 var session = require('express-session');
 var FacebookStrategy = require('passport-facebook').Strategy;
 var GoogleStrategy = require('passport-google-oauth').OAuth2Strategy;
 var path = require('path');
 //
-// Passport session setup.
-//   To support persistent signin sessions, Passport needs to be able to
-//   serialize users into and deserialize users out of the session.  Typically,
-//   this will be as simple as storing the user ID when serializing, and finding
-//   the user by ID when deserializing.  However, since this example does not
-//   have a database of user records, the complete Facebook profile is serialized
-//   and deserialized.
-//
-passport.serializeUser(function (user, done) {
-    // TODO: return the user's LH id given the LH user profile info
-    // E.g., done(null, user.id)
-    done(null, user);
-});
-passport.deserializeUser(function (userObj, done) {
-    // TODO: return the user's LH profile info given the userId
-    // E.g., DB.GetUser(userId, function(user) { done(null, userInfo); })
-    done(null, userObj);
-});
-//
 // Lighthouse Session Manager
 //
 var LHSessionMgr = (function () {
     function LHSessionMgr(appName, hostURL, authConfig, options) {
+        var _this = this;
         var options = options || {};
         this.appName = appName;
         this.hostURL = hostURL;
@@ -45,11 +28,32 @@ var LHSessionMgr = (function () {
             servers: [{ host: this.dbHost, port: this.dbPort }],
             db: 'UserIdentities'
         });
-        // DEBUGGING true ||
-        if (true || options.initDatabase) {
-            this.initDB();
+        if (options.initDatabase) {
+            this._initDB();
         }
         this.signinTmpl = swig_1.compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
+        //
+        // Passport session setup.
+        //   To support persistent signin sessions, Passport needs to be able to
+        //   serialize users into and deserialize users out of the session.  Typically,
+        //   this will be as simple as storing the user ID when serializing, and finding
+        //   the user by ID when deserializing.  However, since this example does not
+        //   have a database of user records, the complete Facebook profile is serialized
+        //   and deserialized.
+        //
+        passport.serializeUser(function (user, done) {
+            // return the user's LH id given the LH user profile info
+            done(null, user.id);
+        });
+        passport.deserializeUser(function (userId, done) {
+            // return the user's LH profile info given the userId
+            _this.getUser(userId).then(function (user) {
+                done(null, user);
+            }).catch(function (err) {
+                console.error("desializeuser: Unable to get user", userId);
+                done(null, null);
+            });
+        });
         var strategy;
         if (authConfig.facebook) {
             if (!authConfig.facebook.callbackURL) {
@@ -106,7 +110,41 @@ var LHSessionMgr = (function () {
         }
         return null;
     };
-    LHSessionMgr.prototype.initDB = function () {
+    LHSessionMgr.prototype.getUser = function (userId) {
+        var _this = this;
+        var _r = this.r;
+        var user;
+        return new Promise(function (resolve, reject) {
+            _r.table('users').get(userId).run().then(function (userMatch) {
+                user = userMatch;
+                return _r.table('authProviders').getAll(userId, { index: "userIdIndex" }).run();
+            }).then(function (authInfo) {
+                var msg;
+                if (!user || !authInfo) {
+                    if (user) {
+                        msg = "user found but no authProviders for userId: " + userId;
+                    }
+                    if (authInfo) {
+                        msg = "authProviders found but no user for userId: " + userId;
+                    }
+                    console.error(msg);
+                    reject(msg);
+                    return;
+                }
+                user.providerInfo = authInfo;
+                // Consolidate providerInfo into user object
+                _this._consolidateProviderInfo(user);
+                resolve(user);
+            }).catch(function (err) {
+                var msg = "getUser: failed with error: " + err;
+                reject(Error(msg));
+            });
+        });
+    };
+    // 
+    // Private methods
+    // 
+    LHSessionMgr.prototype._initDB = function () {
         var _r = this.r;
         console.log("initDB: About to create UserIdentities");
         _r.dbCreate("UserIdentities").run().finally(function () {
@@ -171,9 +209,6 @@ var LHSessionMgr = (function () {
             console.log("initDB: Done!");
         });
     };
-    // 
-    // Private methods
-    // 
     LHSessionMgr.prototype._registerRoutes = function (app, provider) {
         var self = this;
         // GET /<authPath>/<provider>
@@ -212,21 +247,181 @@ var LHSessionMgr = (function () {
         });
     };
     ;
-    LHSessionMgr.prototype._handleAuthentication = function (accessToken, refreshToken, profile, done) {
-        // asynchronous verification, for effect...
+    LHSessionMgr.prototype._handleAuthentication = function (accessToken, refreshToken, authProfile, done) {
+        var _this = this;
+        var _r = this.r;
         process.nextTick(function () {
             // Special case for google (passport-google plugin is apparently missing this)
-            if (!profile.profileUrl && profile._json.url) {
-                profile.profileUrl = profile._json.url;
+            if (!authProfile.profileUrl && authProfile._json.url) {
+                authProfile.profileUrl = authProfile._json.url;
             }
-            console.log("Successfully Authenticated", profile);
-            // Look up this user in the database.  If not found, try to find a 
-            // matching user (only by email for now), and if not found, 
-            // To keep the example simple, the user's profile is returned to
-            // represent the logged-in user.  In a typical application, you would want
-            // to associate the account with a user record in your database,
-            // and return that user instead.
-            return done(null, profile);
+            console.log("Successfully Authenticated", authProfile);
+            var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
+            var matches = null;
+            //
+            // First, check whether this user already has a listing from this provider
+            //
+            _r.table('authProviders').get(providerIdStr).run().then(function (match) {
+                if (match) {
+                    // Assemble the full user document
+                    return _this.getUser(match.userId);
+                }
+                else {
+                    // TODO: First, Search for matching email addresses by other authorization providers
+                    // For now, just create new user 
+                    return _this._createNewUser(authProfile);
+                }
+            }).then(function (user) {
+                return done(null, user);
+            }).error(function (err) {
+                ;
+                console.error("Getting user returned error", err);
+                return done(null, null);
+            });
+        });
+    };
+    LHSessionMgr.prototype._createNewUser = function (info) {
+        var _this = this;
+        var _r = this.r;
+        var user = null;
+        var providerInfo = null;
+        console.log("Creating new user");
+        return new Promise(function (resolve, reject) {
+            console.log("About to incremenet userCount");
+            _r.table('globals').get('userCount').update({ value: _r.row('value').add(1) }, { returnChanges: true }).run().then(function (res) {
+                if (!res || !res.changes || !res.changes[0].new_val) {
+                    var msg = "_createNewUser: Unable to increment global user count: " + res;
+                    console.error(msg);
+                    reject(msg);
+                    return;
+                }
+                console.log("About to create new user doc");
+                user = {
+                    id: FIRST_USERID + res.changes[0].new_val['value'],
+                    created: new Date()
+                };
+                return _r.table('users').insert(user).run();
+            }).then(function (res) {
+                console.log("About to create new authInfo doc for user");
+                var i;
+                var emails = [];
+                if (info.emails) {
+                    for (i = 0; i < info.emails.length; i++) {
+                        emails.push(info.emails[i].value);
+                    }
+                }
+                var photos = [];
+                if (info.photos) {
+                    for (i = 0; i < info.photos.length; i++) {
+                        photos.push(info.photos[i].value);
+                    }
+                }
+                providerInfo = {
+                    id: _this._providerIdStr(info.provider, info.id),
+                    userId: user.id,
+                    provider: info.provider,
+                    providerId: info.id,
+                    username: info.username,
+                    passwordHash: null,
+                    lastSignin: new Date(),
+                    emails: emails,
+                    displayName: info.displayName,
+                    name: {
+                        familyName: info.name.familyName,
+                        givenName: info.name.givenName,
+                        middleName: info.name.middleName
+                    },
+                    gender: info.gender,
+                    photos: info.photos,
+                    profileUrl: info.profileUrl
+                };
+                return _r.table('authProviders').insert(providerInfo).run();
+            }).then(function (res) {
+                user.providerInfo = [providerInfo];
+                resolve(user);
+            }).error(function (err) {
+                reject(Error("Unable to create new user, got error: " + err));
+            });
+        });
+    };
+    LHSessionMgr.prototype._consolidateProviderInfo = function (user) {
+        if (!user.providerInfo) {
+            return;
+        }
+        var info, i, j;
+        for (i = 0; i < user.providerInfo.length; i++) {
+            info = user.providerInfo[i];
+            if (!user.lastSignin || user.lastSignin < info.lastSignIn) {
+                user.lastSignin = info.lastSignin;
+            }
+            if (info.emails) {
+                if (!user.emails) {
+                    user.emails = [];
+                }
+                for (j = 0; j < info.emails.length; j++) {
+                    if (!this._listContains(user.emails, info.emails[j], { caseInsensitive: true })) {
+                        user.emails.push(info.emails[j]);
+                    }
+                }
+            }
+            if (!user.displayName) {
+                user.displayName = info.displayName;
+            }
+            if (!user.name) {
+                user.name = {};
+            }
+            if (!user.name.familyName) {
+                user.name.familyName = info.name.familyName;
+            }
+            if (!user.name.givenName) {
+                user.name.familyName = info.name.givenName;
+            }
+            if (!user.name.middleName) {
+                user.name.familyName = info.name.middleName;
+            }
+            if (!user.gender) {
+                user.gender = info.gender;
+            }
+            if (info.photos) {
+                if (!user.photos) {
+                    user.photos = [];
+                }
+                for (j = 0; j < info.photos.length; j++) {
+                    user.photos.push(info.photos[j]);
+                }
+            }
+        }
+    };
+    LHSessionMgr.prototype._listContains = function (destList, newStr, options) {
+        if (options.caseInsensitive) {
+            newStr = newStr.toLowerCase();
+        }
+        for (var i = 0; i < destList.length; i++) {
+            if (options.caseInsensitive) {
+                if (destList[i].toLowerCase() == newStr) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    LHSessionMgr.prototype._userFromProviderInfo = function (providerInfo) {
+        var _this = this;
+        var _r = this.r;
+        if (Array.isArray(providerInfo)) {
+            console.error("_userFromProviderInfo passed an array!");
+            providerInfo = providerInfo[0];
+        }
+        console.log("Assembling  user from provider info");
+        return new Promise(function (resolve, reject) {
+            _r.table('users').get(providerInfo.userId).run().then(function (user) {
+                user.providerInfo = [providerInfo];
+                resolve(user);
+            }).error(function (err) {
+                var msg = "_userFromProviderInfo: failed to find user: " + providerInfo.userId;
+                console.error(msg);
+                reject(Error(msg));
+            });
         });
     };
     LHSessionMgr.prototype._signinURL = function (provider) {
@@ -234,6 +429,9 @@ var LHSessionMgr = (function () {
     };
     LHSessionMgr.prototype._callbackURL = function (provider) {
         return this.authPath + '/' + provider + '/callback';
+    };
+    LHSessionMgr.prototype._providerIdStr = function (provider, providerId) {
+        return provider + ':' + providerId;
     };
     return LHSessionMgr;
 })();
