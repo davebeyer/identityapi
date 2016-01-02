@@ -120,7 +120,7 @@ var LHSessionMgr = (function () {
                 return _r.table('authProviders').getAll(userId, { index: "userIdIndex" }).run();
             }).then(function (authInfo) {
                 var msg;
-                if (!user || !authInfo) {
+                if (!user || !authInfo || authInfo.length <= 0) {
                     if (user) {
                         msg = "user found but no authProviders for userId: " + userId;
                     }
@@ -257,7 +257,6 @@ var LHSessionMgr = (function () {
             }
             console.log("Successfully Authenticated", authProfile);
             var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
-            var matches = null;
             //
             // First, check whether this user already has a listing from this provider
             //
@@ -267,30 +266,71 @@ var LHSessionMgr = (function () {
                     return _this.getUser(match.userId);
                 }
                 else {
-                    // TODO: First, Search for matching email addresses by other authorization providers
-                    // For now, just create new user 
-                    return _this._createNewUser(authProfile);
+                    // Look for a match for this user with another provider
+                    return _this._seekUserMatch(authProfile);
+                }
+            }).then(function (user) {
+                if (user) {
+                    return done(null, user);
+                }
+                else {
+                    // Unable to lookup or match to existing user, so create a new one
+                    return _this._createUser(authProfile);
                 }
             }).then(function (user) {
                 return done(null, user);
             }).error(function (err) {
-                ;
                 console.error("Getting user returned error", err);
                 return done(null, null);
             });
         });
     };
-    LHSessionMgr.prototype._createNewUser = function (info) {
+    LHSessionMgr.prototype._seekUserMatch = function (authProfile) {
+        var _this = this;
+        var _r = this.r;
+        return new Promise(function (resolve, reject) {
+            if (!authProfile.emails) {
+                resolve(null); // no matches
+                return;
+            }
+            var emails = [];
+            for (var i = 0; i < authProfile.emails.length; i++) {
+                emails.push(authProfile.emails[i]['value'].toLowerCase());
+            }
+            // Search for all authProvider documents which match any of the emails in this authProfile
+            _r.table('authProviders').getAll(_r.args(emails), { index: 'emailIndex' }).run().then(function (matches) {
+                if (!matches || matches.length <= 0) {
+                    return null;
+                }
+                else {
+                    // merge this user with the first match
+                    // So first, get the user
+                    return _this.getUser(matches[0].userId);
+                }
+            }).then(function (user) {
+                if (user) {
+                    // Then, create the new authProvider, and add to this user
+                    return _this._createAuthProviderForUser(user, authProfile);
+                }
+            }).then(function (user) {
+                // return
+                resolve(user); // may be null (if none could be found originally)
+            }).catch(function (err) {
+                var msg = "_seekUserMatch: failed with error: " + err;
+                console.error(err);
+                reject(err);
+            });
+        });
+    };
+    LHSessionMgr.prototype._createUser = function (info) {
         var _this = this;
         var _r = this.r;
         var user = null;
-        var providerInfo = null;
-        console.log("Creating new user");
         return new Promise(function (resolve, reject) {
             console.log("About to incremenet userCount");
             _r.table('globals').get('userCount').update({ value: _r.row('value').add(1) }, { returnChanges: true }).run().then(function (res) {
                 if (!res || !res.changes || !res.changes[0].new_val) {
-                    var msg = "_createNewUser: Unable to increment global user count: " + res;
+                    var msg = "_createUser: Unable to increment global user count: " + res;
                     console.error(msg);
                     reject(msg);
                     return;
@@ -302,42 +342,59 @@ var LHSessionMgr = (function () {
                 };
                 return _r.table('users').insert(user).run();
             }).then(function (res) {
-                console.log("About to create new authInfo doc for user");
-                var i;
-                var emails = [];
-                if (info.emails) {
-                    for (i = 0; i < info.emails.length; i++) {
-                        emails.push(info.emails[i].value);
-                    }
+                return _this._createAuthProviderForUser(user, info);
+            }).then(function (user) {
+                resolve(user);
+            }).catch(function (err) {
+                reject(Error("Unable to create new user, got error: " + err));
+            });
+        });
+    };
+    LHSessionMgr.prototype._createAuthProviderForUser = function (user, info) {
+        var _this = this;
+        var _r = this.r;
+        var providerInfo = null;
+        return new Promise(function (resolve, reject) {
+            console.log("About to create new authProvider for user");
+            var i;
+            var emails = [];
+            if (info.emails) {
+                for (i = 0; i < info.emails.length; i++) {
+                    emails.push(info.emails[i].value);
                 }
-                var photos = [];
-                if (info.photos) {
-                    for (i = 0; i < info.photos.length; i++) {
-                        photos.push(info.photos[i].value);
-                    }
+            }
+            var photos = [];
+            if (info.photos) {
+                for (i = 0; i < info.photos.length; i++) {
+                    photos.push(info.photos[i].value);
                 }
-                providerInfo = {
-                    id: _this._providerIdStr(info.provider, info.id),
-                    userId: user.id,
-                    provider: info.provider,
-                    providerId: info.id,
-                    username: info.username,
-                    passwordHash: null,
-                    lastSignin: new Date(),
-                    emails: emails,
-                    displayName: info.displayName,
-                    name: {
-                        familyName: info.name.familyName,
-                        givenName: info.name.givenName,
-                        middleName: info.name.middleName
-                    },
-                    gender: info.gender,
-                    photos: info.photos,
-                    profileUrl: info.profileUrl
-                };
-                return _r.table('authProviders').insert(providerInfo).run();
-            }).then(function (res) {
-                user.providerInfo = [providerInfo];
+            }
+            providerInfo = {
+                id: _this._providerIdStr(info.provider, info.id),
+                userId: user.id,
+                provider: info.provider,
+                providerId: info.id,
+                username: info.username,
+                passwordHash: null,
+                lastSignin: new Date(),
+                emails: emails,
+                displayName: info.displayName,
+                name: {
+                    familyName: info.name.familyName,
+                    givenName: info.name.givenName,
+                    middleName: info.name.middleName
+                },
+                gender: info.gender,
+                photos: info.photos,
+                profileUrl: info.profileUrl
+            };
+            _r.table('authProviders').insert(providerInfo).run().then(function (res) {
+                if (!user.providerInfo) {
+                    user.providerInfo = [];
+                }
+                user.providerInfo.push(providerInfo);
+                // Consolidate new providerInfo in user object
+                _this._consolidateProviderInfo(user);
                 resolve(user);
             }).error(function (err) {
                 reject(Error("Unable to create new user, got error: " + err));
@@ -404,25 +461,6 @@ var LHSessionMgr = (function () {
             }
         }
         return false;
-    };
-    LHSessionMgr.prototype._userFromProviderInfo = function (providerInfo) {
-        var _this = this;
-        var _r = this.r;
-        if (Array.isArray(providerInfo)) {
-            console.error("_userFromProviderInfo passed an array!");
-            providerInfo = providerInfo[0];
-        }
-        console.log("Assembling  user from provider info");
-        return new Promise(function (resolve, reject) {
-            _r.table('users').get(providerInfo.userId).run().then(function (user) {
-                user.providerInfo = [providerInfo];
-                resolve(user);
-            }).error(function (err) {
-                var msg = "_userFromProviderInfo: failed to find user: " + providerInfo.userId;
-                console.error(msg);
-                reject(Error(msg));
-            });
-        });
     };
     LHSessionMgr.prototype._signinURL = function (provider) {
         return this.authPath + '/' + provider;

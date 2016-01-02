@@ -174,8 +174,8 @@ export class LHSessionMgr {
                 user = userMatch;
                 return _r.table('authProviders').getAll(userId, {index : "userIdIndex"}).run();
             }).then(function(authInfo) {
-		var msg;
-                if (!user || !authInfo) {
+                var msg;
+                if (!user || !authInfo || authInfo.length <= 0) {
                     if (user) {
                         msg = "user found but no authProviders for userId: " + userId;
                     }
@@ -190,9 +190,9 @@ export class LHSessionMgr {
 
                 user.providerInfo = authInfo;
 
-		// Consolidate providerInfo into user object
-		_this._consolidateProviderInfo(user);
-		
+                // Consolidate providerInfo into user object
+                _this._consolidateProviderInfo(user);
+                
                 resolve(user);
 
             }).catch(function(err) {
@@ -358,8 +358,6 @@ export class LHSessionMgr {
 
             var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
 
-            var matches = null;
-
             //
             // First, check whether this user already has a listing from this provider
             //
@@ -369,30 +367,78 @@ export class LHSessionMgr {
                     // Assemble the full user document
                     return _this.getUser(match.userId);
                 } else {
-                    // TODO: First, Search for matching email addresses by other authorization providers
+                    // Look for a match for this user with another provider
+                    return _this._seekUserMatch(authProfile);
+                }
 
-                    // For now, just create new user 
-                    return _this._createNewUser(authProfile);
+            }).then(function(user) {
+                if (user) {
+                    return done(null, user);
+                } else {
+                    // Unable to lookup or match to existing user, so create a new one
+                    return _this._createUser(authProfile);
                 }
 
             }).then(function(user) {
                 return done(null, user);
 
-            }).error(function(err) {;
+            }).error(function(err) {
                 console.error("Getting user returned error", err);
                 return done(null, null);
             });
         });
     }
 
-    _createNewUser(info) {
+    _seekUserMatch(authProfile) {
         var _this = this;
         var _r    = this.r;
 
-        var user         = null;
-        var providerInfo = null;
+        return new Promise(function(resolve, reject) {
+            if (!authProfile.emails) {
+                resolve(null); // no matches
+                return;
+            }
 
-        console.log("Creating new user");
+            var emails = [];
+            for (var i = 0; i < authProfile.emails.length; i++) {
+                emails.push( authProfile.emails[i]['value'].toLowerCase() );
+            }
+
+            // Search for all authProvider documents which match any of the emails in this authProfile
+            _r.table('authProviders').getAll(_r.args(emails), {index : 'emailIndex'}).run().then(function(matches) {
+                if (!matches || matches.length <= 0) {
+		    return null;
+                } else {
+                    // merge this user with the first match
+
+                    // So first, get the user
+                    return _this.getUser(matches[0].userId);
+		}
+
+            }).then(function(user) {
+		if (user) {
+                    // Then, create the new authProvider, and add to this user
+                    return _this._createAuthProviderForUser(user, authProfile);
+		}
+
+            }).then(function(user) {
+                // return
+                resolve(user);  // may be null (if none could be found originally)
+
+            }).catch(function(err) {
+                var msg = "_seekUserMatch: failed with error: " + err;
+                console.error(err);
+                reject(err);
+
+            });
+        });
+    }
+
+    _createUser(info) {
+        var _this = this;
+        var _r    = this.r;
+
+        var user  = null;
 
         return new Promise(function(resolve, reject) {
 
@@ -402,7 +448,7 @@ export class LHSessionMgr {
                 { value: _r.row('value').add(1) }, { returnChanges : true }
             ).run().then(function(res) {
                 if (!res || !res.changes || !res.changes[0].new_val) {
-                    var msg = "_createNewUser: Unable to increment global user count: " + res
+                    var msg = "_createUser: Unable to increment global user count: " + res
                     console.error(msg);
                     reject(msg);
                     return;
@@ -418,142 +464,137 @@ export class LHSessionMgr {
                 return _r.table('users').insert(user).run();
 
             }).then(function(res) {
+                return _this._createAuthProviderForUser(user, info);
 
-                console.log("About to create new authInfo doc for user");
+            }).then(function(user) {
+                resolve(user);
 
-                var i;
+            }).catch(function(err) {
+                reject(Error("Unable to create new user, got error: " + err));
+            });
+        });
+    }
 
-                var emails = [];
-                if (info.emails) {
-                    for (i = 0; i < info.emails.length; i++) {
-                        emails.push(info.emails[i].value);
-                    }
+    _createAuthProviderForUser(user, info) {
+        var _this = this;
+        var _r    = this.r;
+        var providerInfo = null;
+
+        return new Promise(function(resolve, reject) {
+
+            console.log("About to create new authProvider for user");
+
+            var i;
+
+            var emails = [];
+            if (info.emails) {
+                for (i = 0; i < info.emails.length; i++) {
+                    emails.push(info.emails[i].value);
                 }
+            }
 
-                var photos = [];
-                if (info.photos) {
-                    for (i = 0; i < info.photos.length; i++) {
-                        photos.push(info.photos[i].value);
-                    }
+            var photos = [];
+            if (info.photos) {
+                for (i = 0; i < info.photos.length; i++) {
+                    photos.push(info.photos[i].value);
                 }
+            }
                 
-                providerInfo = {
-                    id           : _this._providerIdStr(info.provider,info.id),
-                    userId       : user.id,
-                    provider     : info.provider,
-                    providerId   : info.id,
-                    username     : info.username,
-                    passwordHash : null,
-                    lastSignin   : new Date(),
-                    emails       : emails,
-                    displayName  : info.displayName,
-                    name : {
-                        familyName : info.name.familyName,
-                        givenName  : info.name.givenName,
-                        middleName : info.name.middleName
-                    },
-                    gender       : info.gender,
-                    photos       : info.photos,
-                    profileUrl   : info.profileUrl
-                };
+            providerInfo = {
+                id           : _this._providerIdStr(info.provider,info.id),
+                userId       : user.id,
+                provider     : info.provider,
+                providerId   : info.id,
+                username     : info.username,
+                passwordHash : null,
+                lastSignin   : new Date(),
+                emails       : emails,
+                displayName  : info.displayName,
+                name : {
+                    familyName : info.name.familyName,
+                    givenName  : info.name.givenName,
+                    middleName : info.name.middleName
+                },
+                gender       : info.gender,
+                photos       : info.photos,
+                profileUrl   : info.profileUrl
+            };
 
-                return _r.table('authProviders').insert(providerInfo).run();
+            _r.table('authProviders').insert(providerInfo).run().then(function(res) {
 
-            }).then(function(res) {
+                if (!user.providerInfo) { user.providerInfo = []; }
+                user.providerInfo.push(providerInfo);
 
-                user.providerInfo = [providerInfo];
+                // Consolidate new providerInfo in user object
+                _this._consolidateProviderInfo(user);
+
                 resolve(user);
 
             }).error(function(err) {
                 reject(Error("Unable to create new user, got error: " + err));
-
             });
         });
     }
 
     _consolidateProviderInfo(user) {
-	if (!user.providerInfo) {
-	    return;
-	}
+        if (!user.providerInfo) {
+            return;
+        }
 
-	var info, i, j;
+        var info, i, j;
 
-	for (i = 0; i < user.providerInfo.length; i++) {
-	    info = user.providerInfo[i];
+        for (i = 0; i < user.providerInfo.length; i++) {
+            info = user.providerInfo[i];
 
-	    if (!user.lastSignin || user.lastSignin < info.lastSignIn) {
-		user.lastSignin = info.lastSignin;
-	    }
+            if (!user.lastSignin || user.lastSignin < info.lastSignIn) {
+                user.lastSignin = info.lastSignin;
+            }
 
-	    if (info.emails) {
-		if (!user.emails) { user.emails = []; }
-		for (j = 0; j < info.emails.length; j++) {
-		    if (! this._listContains(user.emails, info.emails[j], {caseInsensitive : true}) ) {
-			user.emails.push(info.emails[j]);
-		    }
-		}
-	    }
+            if (info.emails) {
+                if (!user.emails) { user.emails = []; }
+                for (j = 0; j < info.emails.length; j++) {
+                    if (! this._listContains(user.emails, info.emails[j], {caseInsensitive : true}) ) {
+                        user.emails.push(info.emails[j]);
+                    }
+                }
+            }
 
-	    if (!user.displayName)     { user.displayName = info.displayName; }
+            if (!user.displayName)     { user.displayName = info.displayName; }
 
-	    if (!user.name)            { user.name = {}; }
-	    
-	    if (!user.name.familyName) { user.name.familyName = info.name.familyName; }
-	    if (!user.name.givenName)  { user.name.familyName = info.name.givenName; }
-	    if (!user.name.middleName) { user.name.familyName = info.name.middleName; }
+            if (!user.name)            { user.name = {}; }
+            
+            if (!user.name.familyName) { user.name.familyName = info.name.familyName; }
+            if (!user.name.givenName)  { user.name.familyName = info.name.givenName; }
+            if (!user.name.middleName) { user.name.familyName = info.name.middleName; }
 
-	    if (!user.gender)          { user.gender = info.gender; }
+            if (!user.gender)          { user.gender = info.gender; }
 
-	    if (info.photos) {
-		if (!user.photos) { user.photos = []; }
-		for (j = 0; j < info.photos.length; j++) {
-		    user.photos.push(info.photos[j]);
-		}
-	    }
+            if (info.photos) {
+                if (!user.photos) { user.photos = []; }
+                for (j = 0; j < info.photos.length; j++) {
+                    user.photos.push(info.photos[j]);
+                }
+            }
 
-	    // id, provider, providerId, username, passwordHash, and profileUrl are specific 
-	    // to provider, so don't promote to main user object.
-	}
+            // id, provider, providerId, username, passwordHash, and profileUrl are specific 
+            // to provider, so don't promote to main user object.
+        }
 
     }
 
     _listContains(destList, newStr, options) {
-	if (options.caseInsensitive) {
-	    newStr = newStr.toLowerCase();
-	}
-	
-	for (var i = 0; i < destList.length; i++) {
-	    if (options.caseInsensitive) {
-		if (destList[i].toLowerCase() == newStr) {
-		    return true;
-		}
-	    }
-	}
-	return false;
-    }
-
-
-    _userFromProviderInfo(providerInfo) {
-        var _this = this;
-        var _r    = this.r;
-
-        if (Array.isArray(providerInfo)) {
-	    console.error("_userFromProviderInfo passed an array!");
-	    providerInfo = providerInfo[0];
+        if (options.caseInsensitive) {
+            newStr = newStr.toLowerCase();
         }
-
-        console.log("Assembling  user from provider info");
-
-        return new Promise(function(resolve, reject) {
-            _r.table('users').get(providerInfo.userId).run().then(function(user) {
-                user.providerInfo = [providerInfo];
-                resolve(user)
-            }).error(function(err) {
-                var msg = "_userFromProviderInfo: failed to find user: " + providerInfo.userId;
-                console.error(msg);
-                reject(Error(msg));
-            });
-        });
+        
+        for (var i = 0; i < destList.length; i++) {
+            if (options.caseInsensitive) {
+                if (destList[i].toLowerCase() == newStr) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     _signinURL(provider) {
