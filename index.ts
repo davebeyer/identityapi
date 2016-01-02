@@ -411,6 +411,8 @@ export class LHSessionMgr {
                 } else {
                     // merge this user with the first match
 
+		    // TODO: ASK USER BEFORE MERGING
+
                     // So first, get the user
                     return _this.getUser(matches[0].userId);
 		}
