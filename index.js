@@ -1,6 +1,5 @@
 /// <reference path="./typings/tsd.d.ts" />
 var swig_1 = require('swig');
-var r = require('rethinkdb');
 var passport = require('passport');
 var session = require('express-session');
 var FacebookStrategy = require('passport-facebook').Strategy;
@@ -40,7 +39,14 @@ var LHSessionMgr = (function () {
         this.failurePath = options.failurePath || this.authPath + '/signin';
         this.dbHost = options.dbHost || 'localhost';
         this.dbPort = options.dbPort || 28035;
-        if (options.initDatabase) {
+        // Open rethinkdb with connection pool, and set default database (works
+        // even if UserIdentities doesn't yet exist)
+        this.r = require('rethinkdbdash')({
+            servers: [{ host: this.dbHost, port: this.dbPort }],
+            db: 'UserIdentities'
+        });
+        // DEBUGGING true ||
+        if (true || options.initDatabase) {
             this.initDB();
         }
         this.signinTmpl = swig_1.compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
@@ -101,57 +107,68 @@ var LHSessionMgr = (function () {
         return null;
     };
     LHSessionMgr.prototype.initDB = function () {
-        console.log("initDB: About to connect");
-        r.connect({ host: this.dbHost, port: this.dbPort }).then(function (conn) {
-            console.log("initDB: About to create UserIdentities");
-            r.dbCreate("UserIdentities").run(conn).finally(function () {
-                // Switch to the UserIdenties database
-                conn.use("UserIdentities");
-                console.log("initDB: About to create globals table");
-                return r.tableCreate('globals').run(conn);
-            }).finally(function () {
-                console.log("initDB: About to insert userCount into globals table");
-                return r.table('globals').insert({
-                    id: 'userCount',
-                    value: 100
-                }).run(conn);
-            }).finally(function () {
-                console.log("initDB: About to create users table");
-                return r.tableCreate('users').run(conn);
-            }).finally(function () {
-                console.log("initDB: About to insert dummy user");
-                return r.table('users').insert({
-                    id: 99,
-                    created: new Date(),
-                    providers: [{
-                            provider: 'lighthouse',
-                            providerId: 99,
-                            username: 'dummy@example.com',
-                            passwordHash: null,
-                            emails: ['dummy@example.com'],
-                            displayName: 'Dummy User',
-                            name: {
-                                familyName: 'User',
-                                givenName: 'Dummy',
-                                middleName: null
-                            },
-                            gender: 'other',
-                            photos: [],
-                            profileUrl: ''
-                        }]
-                }).run(conn);
-            }).finally(function () {
-                console.log("initDB: About to create emailIndex");
-                return r.table('users').indexCreate('emailIndex', r.row('providers')('emails'), { multi: true }).run(conn);
-            }).finally(function () {
-                console.log("initDB: About to wait for emailIndex");
-                return r.table('users').indexWait('emailIndex').run(conn);
-            }).finally(function () {
-                console.log("initDB: Done!");
+        var _r = this.r;
+        console.log("initDB: About to create UserIdentities");
+        _r.dbCreate("UserIdentities").run().finally(function () {
+            console.log("initDB: About to create globals table");
+            return _r.tableCreate('globals').run();
+        }).finally(function () {
+            console.log("initDB: About to insert userCount into globals table");
+            return _r.table('globals').insert({
+                id: 'userCount',
+                value: 0
+            }).run();
+        }).finally(function () {
+            console.log("initDB: About to create users table");
+            return _r.tableCreate('users').run();
+        }).finally(function () {
+            console.log("initDB: About to insert dummy user");
+            return _r.table('users').insert({
+                id: 99,
+                created: new Date(),
             });
-        }).error(function (err) {
-            console.error("initDB: Could not open connection to the database", this.dbHost, this.dbPort);
-            process.exit();
+        }).finally(function () {
+            console.log("initDB: About to create authProviders table");
+            return _r.tableCreate('authProviders').run();
+        }).finally(function () {
+            console.log("initDB: About to insert dummy authProvider entry");
+            return _r.table('authProviders').insert({
+                id: 'lh:99',
+                userId: 99,
+                provider: 'lh',
+                providerId: 99,
+                username: 'dummy@example.com',
+                passwordHash: null,
+                lastSignin: null,
+                emails: ['dummy1@example.com', 'DUMMY2@example.com'],
+                displayName: 'Dummy User',
+                name: {
+                    familyName: 'User',
+                    givenName: 'Dummy',
+                    middleName: null
+                },
+                gender: 'other',
+                photos: [],
+                profileUrl: ''
+            }).run();
+        }).finally(function () {
+            console.log("initDB: About to create userIdIndex");
+            return _r.table('authProviders').indexCreate('userIdIndex', _r.row('userId')).run();
+        }).finally(function () {
+            console.log("initDB: About to wait for userIdIndex");
+            return _r.table('authProviders').indexWait('userIdIndex').run();
+        }).finally(function () {
+            console.log("initDB: About to create emailIndex");
+            return _r.table('authProviders').indexCreate('emailIndex', _r.row('emails').map(function (email) {
+                // need to use expr() to convert to an object that 
+                // ReQL commands can operate on
+                return _r.expr(email).downcase();
+            }), { multi: true }).run();
+        }).finally(function () {
+            console.log("initDB: About to wait for emailIndex");
+            return _r.table('authProviders').indexWait('emailIndex').run();
+        }).finally(function () {
+            console.log("initDB: Done!");
         });
     };
     // 
