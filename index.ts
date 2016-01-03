@@ -1,5 +1,4 @@
 /// <reference path="./typings/tsd.d.ts" />
-import {compileFile} from 'swig';
 
 var FIRST_USERID     = 100;
 
@@ -8,19 +7,14 @@ var session          = require('express-session');
 var FacebookStrategy = require('passport-facebook').Strategy;
 var GoogleStrategy   = require('passport-google-oauth').OAuth2Strategy;
 
-var path             = require('path');
 
 //
 // Lighthouse Session Manager
 //
 
 export class LHSessionMgr {
-    signinTmpl  : any;
-
-    appName     : string;
     authConfig  : any;
 
-    klass       : string;
     hostURL     : string;
     authPath    : string;
     successPath : string;
@@ -31,15 +25,13 @@ export class LHSessionMgr {
 
     r           : any;  // rethinkdb(dash) database driver
 
-    constructor(appName : string, hostURL : string, authConfig : any, options? : any) {
+    constructor(hostURL : string, authConfig : any, options? : any) {
         var _this   = this;
         var options = options || {};
 
-        this.appName     = appName;
         this.hostURL     = hostURL;
         this.authConfig  = authConfig;
 
-        this.klass       = options.klass       || "lh-identity";
         this.authPath    = options.authPath    || "/auth";
         this.successPath = options.successPath || '/';
         this.failurePath = options.failurePath || this.authPath + '/signin';
@@ -57,8 +49,6 @@ export class LHSessionMgr {
         if (options.initDatabase) {
             this._initDB();
         }
-
-        this.signinTmpl = compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
 
         //
         // Passport session setup.
@@ -145,14 +135,26 @@ export class LHSessionMgr {
         }
     }
 
-    renderSignin() : string  {
-        var html = this.signinTmpl({
-            appName        : this.appName,
-            klass          : this.klass,
-            signinFacebook : this.authConfig.facebook ? this._signinURL('facebook') : '',
-            signinGoogle   : this.authConfig.google   ? this._signinURL('google')   : ''
-        });
-        return html;
+    signinOptions() : any  {
+	var res = {};
+
+	if (this.authConfig.facebook) {
+	    res['facebook'] = {
+		'signinUrl' : this._signinURL('facebook')
+	    };
+	}
+
+	if (this.authConfig.google) {
+	    res['google'] = {
+		'signinUrl' : this._signinURL('google')
+	    };
+	}
+
+	return res;
+    }
+
+    signout(req) : void {
+	req.logout();
     }
 
     currentUserId(req) : boolean {
@@ -354,7 +356,7 @@ export class LHSessionMgr {
                 authProfile.profileUrl = authProfile._json.url;
             }
 
-            console.log("Successfully Authenticated" , authProfile);
+            console.log(`Successfully authenticated ${authProfile.displayName} using ${authProfile.provider}`);
 
             var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
 
@@ -373,11 +375,11 @@ export class LHSessionMgr {
 
             }).then(function(user) {
                 if (user) {
-                    return done(null, user);
+                    return user;
                 } else {
                     // Unable to lookup or match to existing user, so create a new one
                     return _this._createUser(authProfile);
-                }
+                } 
 
             }).then(function(user) {
                 return done(null, user);

@@ -1,22 +1,18 @@
 /// <reference path="./typings/tsd.d.ts" />
-var swig_1 = require('swig');
 var FIRST_USERID = 100;
 var passport = require('passport');
 var session = require('express-session');
 var FacebookStrategy = require('passport-facebook').Strategy;
 var GoogleStrategy = require('passport-google-oauth').OAuth2Strategy;
-var path = require('path');
 //
 // Lighthouse Session Manager
 //
 var LHSessionMgr = (function () {
-    function LHSessionMgr(appName, hostURL, authConfig, options) {
+    function LHSessionMgr(hostURL, authConfig, options) {
         var _this = this;
         var options = options || {};
-        this.appName = appName;
         this.hostURL = hostURL;
         this.authConfig = authConfig;
-        this.klass = options.klass || "lh-identity";
         this.authPath = options.authPath || "/auth";
         this.successPath = options.successPath || '/';
         this.failurePath = options.failurePath || this.authPath + '/signin';
@@ -31,7 +27,6 @@ var LHSessionMgr = (function () {
         if (options.initDatabase) {
             this._initDB();
         }
-        this.signinTmpl = swig_1.compileFile(path.resolve(__dirname, 'signin.tmpl.html'));
         //
         // Passport session setup.
         //   To support persistent signin sessions, Passport needs to be able to
@@ -94,14 +89,22 @@ var LHSessionMgr = (function () {
             this._registerRoutes(app, 'google');
         }
     };
-    LHSessionMgr.prototype.renderSignin = function () {
-        var html = this.signinTmpl({
-            appName: this.appName,
-            klass: this.klass,
-            signinFacebook: this.authConfig.facebook ? this._signinURL('facebook') : '',
-            signinGoogle: this.authConfig.google ? this._signinURL('google') : ''
-        });
-        return html;
+    LHSessionMgr.prototype.signinOptions = function () {
+        var res = {};
+        if (this.authConfig.facebook) {
+            res['facebook'] = {
+                'signinUrl': this._signinURL('facebook')
+            };
+        }
+        if (this.authConfig.google) {
+            res['google'] = {
+                'signinUrl': this._signinURL('google')
+            };
+        }
+        return res;
+    };
+    LHSessionMgr.prototype.signout = function (req) {
+        req.logout();
     };
     LHSessionMgr.prototype.currentUserId = function (req) {
         if (req.isAuthenticated()) {
@@ -255,7 +258,7 @@ var LHSessionMgr = (function () {
             if (!authProfile.profileUrl && authProfile._json.url) {
                 authProfile.profileUrl = authProfile._json.url;
             }
-            console.log("Successfully Authenticated", authProfile);
+            console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider);
             var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
             //
             // First, check whether this user already has a listing from this provider
@@ -271,7 +274,7 @@ var LHSessionMgr = (function () {
                 }
             }).then(function (user) {
                 if (user) {
-                    return done(null, user);
+                    return user;
                 }
                 else {
                     // Unable to lookup or match to existing user, so create a new one
