@@ -283,7 +283,7 @@ var LHSessionMgr = (function () {
         //   Identity Server in the provider's application configuration security settings).
         var authenticateFn;
         app.get(_this._signinURL(provider), function (req, res, next) {
-            var rememberMe = req.query && req.query.remember ? req.query.remember : 0;
+            var rememberMe = req.query && req.query.remember ? parseInt(req.query.remember) : 0;
             console.log("/signin/" + provider + ", authenticating with remember me = " + rememberMe);
             var stateData = {
                 r: rememberMe
@@ -316,9 +316,7 @@ var LHSessionMgr = (function () {
         //   which, in this example, will redirect the user to the home page.
         var callbackAuthFn = passport.authenticate(provider, { failureRedirect: _this.failurePath });
         app.get(_this._callbackURL(provider), function (req, res, next) {
-            var jsonStatePkg = req.query ? req.query.state : null;
-            var stateData = _this._parseStatePkg(jsonStatePkg);
-            console.log("Authenticating callback for " + provider + " with remember me = " + stateData.r);
+            console.log("Authenticating callback for " + provider);
             return callbackAuthFn(req, res, next);
         }, function (req, res) {
             console.log("Successful authentication!, redirecting", _this.successPath);
@@ -362,12 +360,18 @@ var LHSessionMgr = (function () {
     LHSessionMgr.prototype._handleAuthentication = function (req, accessToken, refreshToken, authProfile, done) {
         var _this = this;
         var _r = this.r;
+        var jsonStatePkg = req.query ? req.query.state : null;
+        var stateData = this._parseStatePkg(jsonStatePkg);
+        if (stateData.r) {
+            // Remember me flag
+            req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 1 month
+        }
         process.nextTick(function () {
             // Special case for google (passport-google plugin is apparently missing this)
             if (!authProfile.profileUrl && authProfile._json.url) {
                 authProfile.profileUrl = authProfile._json.url;
             }
-            console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider);
+            console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider + " with remember me " + stateData.r);
             var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
             //
             // First, check whether this user already has a listing from this provider
