@@ -1,9 +1,16 @@
 /// <reference path="./typings/tsd.d.ts" />
 
-var FIRST_USERID     = 100;
+const FIRST_USERID    = 100;
+const DB_NAME         = 'UserIdentities';
+const STATE_DATA_DFLT = {r : 0};
 
 var passport         = require('passport');
 var session          = require('express-session');
+var SessionStore     = require('express-session-rethinkdb')(session);
+
+var nonce            = require('nonce')(10);
+var md5              = require('md5');
+
 var FacebookStrategy = require('passport-facebook').Strategy;
 var GoogleStrategy   = require('passport-google-oauth').OAuth2Strategy;
 
@@ -19,31 +26,38 @@ export class LHSessionMgr {
     authPath    : string;
     successPath : string;
     failurePath : string;
+    mergePath   : string;
 
     dbPort      : number;
     dbHost      : string;
+    appAbbrev   : string;
+    secret      : string;
 
-    r           : any;  // rethinkdb(dash) database driver
+    r            : any;    // Rethinkdb(dash) database driver
 
-    constructor(hostURL : string, authConfig : any, options? : any) {
+    constructor(appAbbrev : string, hostURL : string, authConfig : any, options? : any) {
         var _this   = this;
         var options = options || {};
 
+        this.appAbbrev   = appAbbrev;
         this.hostURL     = hostURL;
         this.authConfig  = authConfig;
 
         this.authPath    = options.authPath    || "/auth";
         this.successPath = options.successPath || '/';
         this.failurePath = options.failurePath || this.authPath + '/signin';
+        this.mergePath   = options.mergePath   || this.authPath + '/merge';
 
         this.dbHost      = options.dbHost      || 'localhost';
         this.dbPort      = options.dbPort      || 28035;
+
+        this.secret      = options.secret      || 'lh-session-dflt-secret-hairyflump';
 
         // Open rethinkdb with connection pool, and set default database (works
         // even if UserIdentities doesn't yet exist)
         this.r = require('rethinkdbdash')({
             servers : [{host : this.dbHost, port : this.dbPort}],
-            db : 'UserIdentities'
+            db      : DB_NAME
         }); 
 
         if (options.initDatabase) {
@@ -82,6 +96,9 @@ export class LHSessionMgr {
                 authConfig.facebook.callbackURL = this.hostURL + this.authPath + '/facebook/callback';
             }
 
+            // Pass request object as first argument to callback
+            authConfig.facebook.passReqToCallback = true;
+
             // For Facebook, need to specify profileFields to fetch.  First, create copy
             var fbAuthConfig = (JSON.parse(JSON.stringify(authConfig.facebook)));
 
@@ -101,6 +118,9 @@ export class LHSessionMgr {
                 authConfig.google.callbackURL = this.hostURL + this.authPath + '/google/callback';
             }
 
+            // Pass request object as first argument to callback
+           authConfig.google.passReqToCallback = true;
+
             strategy = new GoogleStrategy(
                 authConfig.google,
                 this._handleAuthentication.bind(this)
@@ -111,12 +131,69 @@ export class LHSessionMgr {
     }
 
     register(app : any) : void {
+        //
+        // Create session store manager
+        // See: https://github.com/armenfilipetyan/express-session-rethinkdb
+        //
+
+        var sessionStore = new SessionStore({
+            connectOptions: {
+                servers    : [{host : this.dbHost, port : this.dbPort}],
+                db         : DB_NAME
+            },
+            
+            table          : 'sessions',
+            sessionTimeout : 3 * 24 * 60 * 60 * 1000  // 3 days
+        });
+
+        //
         // Setup session options
-        // TODO: research resave and saveUninitialized!
+        // See: https://www.npmjs.com/package/express-session
+        //
+
         app.use(session({ 
-            resave: false, 
+            // Ensure the cookie name is different for each application
+            // (called 'key' in prior versions of express-session)
+            name : 'lh-sid.' + this.appAbbrev,
+            
+            // Use 'sessions' table in RethinkDB for session store 
+            // (created above)
+            store: sessionStore,
+
+            // Force resaves to session store when there are no changes, 
+            // since the rethinkdb session store doesn't support the "touch" method.
+            resave: true,
+
+            // Don't save new sessions that haven't been modified 
+            // (not yet initialized)
             saveUninitialized: false,
-            secret: 'lh-session-seed-wickedcoolspaghettimonstah' 
+
+            // Required option, used to sign the session ID cookie
+            // (BTW, separately initializing session-cookie middleware 
+            // is no longer needed/recommended as cookies are now handled
+            // in the session middleware.)
+            secret: this.secret,
+
+            // 
+            // Following are for securing cookies, see:
+            // https://stormpath.com/blog/everything-you-ever-wanted-to-know-about-node-dot-js-sessions/
+            // 
+            cookie : {
+                // Prevent Javascript code from accessing cookies
+                httpOnly: true,
+
+                // Ensure cookies are only used over https
+                // secure: true,
+
+                // Should cookies be deleted when closing the browser?
+                // Instead, could implement per-session, e.g., see:
+                // http://stackoverflow.com/questions/4371178/session-only-cookie-for-express-js
+
+                // By default, expire sessions when the browser is closed.  If "Remember Me" 
+                // is checked, then maxAge will be set elsewhere on a session-specific basis.  
+                // res.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000;   // 30 days
+                maxAge : null
+            }
         }));
 
         // Initialize Passport
@@ -136,25 +213,25 @@ export class LHSessionMgr {
     }
 
     signinOptions() : any  {
-	var res = {};
+        var res = {};
 
-	if (this.authConfig.facebook) {
-	    res['facebook'] = {
-		'signinUrl' : this._signinURL('facebook')
-	    };
-	}
+        if (this.authConfig.facebook) {
+            res['facebook'] = {
+                'signinUrl' : this._signinURL('facebook')
+            };
+        }
 
-	if (this.authConfig.google) {
-	    res['google'] = {
-		'signinUrl' : this._signinURL('google')
-	    };
-	}
+        if (this.authConfig.google) {
+            res['google'] = {
+                'signinUrl' : this._signinURL('google')
+            };
+        }
 
-	return res;
+        return res;
     }
 
     signout(req) : void {
-	req.logout();
+        req.logout();
     }
 
     currentUserId(req) : boolean {
@@ -223,6 +300,10 @@ export class LHSessionMgr {
                 id    : 'userCount',
                 value : 0
             }).run();
+
+        }).finally(function() {
+            console.log("initDB: About to create sessions table");
+            return _r.tableCreate('sessions').run();
 
         }).finally(function() {
             console.log("initDB: About to create users table");
@@ -298,7 +379,7 @@ export class LHSessionMgr {
 
 
     _registerRoutes(app, provider) {
-        var self = this;
+        var _this = this;
 
         // GET /<authPath>/<provider>
         //   Use passport.authenticate() as route middleware to authenticate the
@@ -310,18 +391,34 @@ export class LHSessionMgr {
 
         var authenticateFn;
 
-        if (provider === 'google') {
-            // Special case for Google
-            authenticateFn = passport.authenticate(provider, { scope: ['openid email profile'] });
-        } else {
-            // authenticateFn = passport.authenticate(provider);
-            authenticateFn = passport.authenticate(provider, { scope: ['email'] });
-        }
+        app.get(_this._signinURL(provider), 
+                function(req, res, next) {
+                    var rememberMe = req.query && req.query.remember ? req.query.remember : 0;
+                    console.log(`/signin/${provider}, authenticating with remember me = ${rememberMe}`);
 
-        app.get(self._signinURL(provider), 
-                authenticateFn,
+                    var stateData = {
+                        r : rememberMe
+                    };
+                    var jsonStatePkg = _this._buildStatePkg(stateData);
+                    
+                    if (provider === 'google') {
+                        // Special case for Google
+                        authenticateFn = passport.authenticate(provider, { 
+                            scope : ['openid email profile'],
+                            state : jsonStatePkg
+                        });
+                    } else {
+                        // All others
+                        authenticateFn = passport.authenticate(provider, { 
+                            scope : ['email'],
+                            state : jsonStatePkg
+                        });
+                    }
+
+                    return authenticateFn(req, res, next);
+                },
                 function(req, res) {
-                    console.log("In signin redirect !?");
+                    console.log(`/signin/${provider}, in redirect !?`);
                     // The request will be redirected to the provider for authentication, 
                     // so this function will not be called.
                 });
@@ -332,20 +429,66 @@ export class LHSessionMgr {
         //   sign in page.  Otherwise, the primary route function function will be called,
         //   which, in this example, will redirect the user to the home page.
 
-        var callbackAuthFn = passport.authenticate(provider,  { failureRedirect: self.failurePath });
+        var callbackAuthFn = passport.authenticate(provider,  { failureRedirect: _this.failurePath });
 
-        app.get(self._callbackURL(provider), 
+        app.get(_this._callbackURL(provider), 
                 function(req, res, next) {
-                    console.log("Authenticating callback");
+                    var jsonStatePkg = req.query ? req.query.state : null;
+                    var stateData    = _this._parseStatePkg(jsonStatePkg);
+
+                    console.log(`Authenticating callback for ${provider} with remember me = ${stateData.r}`);
                     return callbackAuthFn(req, res, next);
                 },
                 function(req, res) {
-                    console.log("Successful authentication!, redirecting", self.successPath);
-                    res.redirect(self.successPath);
+                    console.log("Successful authentication!, redirecting", _this.successPath);
+                    res.redirect(_this.successPath);
                 });
     };
 
-    _handleAuthentication(accessToken, refreshToken, authProfile, done) {
+    _buildStatePkg(data) {
+        if (!data) { data = STATE_DATA_DFLT; }
+
+        var jsonState = JSON.stringify(data);
+        var nonceNum  = nonce();
+
+        var statePkg = {
+            d : jsonState,
+            n : nonceNum,
+            h : md5(nonceNum + ':' + jsonState + ':' + this.secret)
+        }
+
+        // TODO: save nonce in globals database
+        // OR, use a new session-nonce table, and store this data there, just send the nonce
+        //     (then, wouldn't need the md5?)
+
+        // (Note that the embedded state is being stringified twice)
+        var jsonPkg = JSON.stringify(statePkg);
+
+        return jsonPkg
+    }
+
+    _parseStatePkg(jsonPkg) {
+        if (!jsonPkg) {
+            return STATE_DATA_DFLT;
+        }
+
+        var statePkg = JSON.parse(jsonPkg);
+
+        if (statePkg.h != md5(statePkg.n + ':' + statePkg.d + ':' + this.secret)) {
+            console.error("LHIdentityServer: Validation check failed for: ", statePkg.d, statePkg.n, statePkg.h);
+            return STATE_DATA_DFLT;
+        }
+
+        // TODO: check that nonce in in globals database, and hasn't been used, 
+        // then set used flag
+
+        return JSON.parse(statePkg.d);
+    }
+
+    // Handle authentication callback.
+    // request object passed as first parameter due to passReqToCallback setting above
+
+    _handleAuthentication(req, accessToken, refreshToken, authProfile, done) {
         var _this = this;
         var _r    = this.r;
 
@@ -409,21 +552,21 @@ export class LHSessionMgr {
             // Search for all authProvider documents which match any of the emails in this authProfile
             _r.table('authProviders').getAll(_r.args(emails), {index : 'emailIndex'}).run().then(function(matches) {
                 if (!matches || matches.length <= 0) {
-		    return null;
+                    return null;
                 } else {
                     // merge this user with the first match
 
-		    // TODO: ASK USER BEFORE MERGING
+                    // TODO: ASK USER BEFORE MERGING
 
                     // So first, get the user
                     return _this.getUser(matches[0].userId);
-		}
+                }
 
             }).then(function(user) {
-		if (user) {
+                if (user) {
                     // Then, create the new authProvider, and add to this user
                     return _this._createAuthProviderForUser(user, authProfile);
-		}
+                }
 
             }).then(function(user) {
                 // return
