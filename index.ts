@@ -454,9 +454,37 @@ export class LHSessionMgr {
             h : md5(nonceNum + ':' + jsonState + ':' + this.secret)
         }
 
-        // TODO: save nonce in globals database
-        // OR, use a new session-nonce table, and store this data there, just send the nonce
-        //     (then, wouldn't need the md5?)
+        // TODO: Create a sessionNonce table, and store this data there:
+	//     id      : <nonce>
+	//     data    : <nested data object, includes rememberMe flag>
+	//     created : <datetime>  // for validity period and cleaning table
+	//     used    : <datetime>  // for indicating if "used" 
+	// 
+	// Then, only send the nonce/id.
+	//
+        // Then, intercepters wouldn't be able to change the data (since it's only 
+	// in our secure database, so should no longer need the MD5), and 
+	// wouldn't be able to reuse old data (since each sessionNonce document 
+	// can only be used once).   They could try intercepting
+	// the nonce (e.g., for their own, fake signin session, 
+	// with rememberMe set to 1), in the redirected callback request 
+	// (assuming it uses http only), and prevent that callback from
+	// reaching our server (so nonceDoc isn't used), then 
+	// try injecting the nonce into someone else's signin session.
+	//
+	// To prevent that, the created date would be used to limit
+	// the validity period to a few secs.  Assuming they could also
+	// time their fake signin to be coincident with the signin of 
+	// the real user then consider adding something 
+	// about this client ID, such as browser's IP address and 
+	// other browser data?  
+	//
+	// HOWEVER, could avoid practically any
+	// issues with changes to a session's nonce by requiring
+	// https in the redirected callback from the browser to the server
+	// (as is already the case for the browser-to-provider connection).
+	// That, combined with a reasonable validity period (in case they try
+	// to decrypt the https session, etc.), should be sufficient.
 
         // (Note that the embedded state is being stringified twice)
         var jsonPkg = JSON.stringify(statePkg);
