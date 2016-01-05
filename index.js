@@ -229,6 +229,9 @@ var LHSessionMgr = (function () {
                 created: new Date(),
             });
         }).finally(function () {
+            console.log("initDB: About to create authState table");
+            return _r.tableCreate('authState').run();
+        }).finally(function () {
             console.log("initDB: About to create authProviders table");
             return _r.tableCreate('authProviders').run();
         }).finally(function () {
@@ -288,22 +291,24 @@ var LHSessionMgr = (function () {
             var stateData = {
                 r: rememberMe
             };
-            var jsonStatePkg = _this._buildStatePkg(stateData);
-            if (provider === 'google') {
-                // Special case for Google
-                authenticateFn = passport.authenticate(provider, {
-                    scope: ['openid email profile'],
-                    state: jsonStatePkg
-                });
-            }
-            else {
-                // All others
-                authenticateFn = passport.authenticate(provider, {
-                    scope: ['email'],
-                    state: jsonStatePkg
-                });
-            }
-            return authenticateFn(req, res, next);
+            _this._saveAuthState(stateData, function (stateId) {
+                if (provider === 'google') {
+                    // Special case for Google
+                    authenticateFn = passport.authenticate(provider, {
+                        scope: ['openid email profile'],
+                        state: stateId
+                    });
+                }
+                else {
+                    // All others
+                    authenticateFn = passport.authenticate(provider, {
+                        scope: ['email'],
+                        state: stateId
+                    });
+                }
+                return authenticateFn(req, res, next);
+            });
+            return null; // IS THIS THE RIGHT RETURN VALUE HERE, INDICATING STILL PROCESSING?
         }, function (req, res) {
             console.log("/signin/" + provider + ", in redirect !?");
             // The request will be redirected to the provider for authentication, 
@@ -324,108 +329,95 @@ var LHSessionMgr = (function () {
         });
     };
     ;
-    LHSessionMgr.prototype._buildStatePkg = function (data) {
+    LHSessionMgr.prototype._saveAuthState = function (data, done) {
         if (!data) {
             data = STATE_DATA_DFLT;
         }
-        var jsonState = JSON.stringify(data);
-        var nonceNum = nonce();
         var statePkg = {
-            d: jsonState,
-            n: nonceNum,
-            h: md5(nonceNum + ':' + jsonState + ':' + this.secret)
+            // id   : <random UUID auto-assigned>
+            data: data,
+            created: new Date(),
+            used: null
         };
-        // TODO: Create a sessionNonce table, and store this data there:
-        //     id      : <nonce>
-        //     data    : <nested data object, includes rememberMe flag>
-        //     created : <datetime>  // for validity period and cleaning table
-        //     used    : <datetime>  // for indicating if "used" 
-        // 
-        // Then, only send the nonce/id.
-        //
-        // Then, intercepters wouldn't be able to change the data (since it's only 
-        // in our secure database, so should no longer need the MD5), and 
-        // wouldn't be able to reuse old data (since each sessionNonce document 
-        // can only be used once).   They could try intercepting
-        // the nonce (e.g., for their own, fake signin session, 
-        // with rememberMe set to 1), in the redirected callback request 
-        // (assuming it uses http only), and prevent that callback from
-        // reaching our server (so nonceDoc isn't used), then 
-        // try injecting the nonce into someone else's signin session.
-        //
-        // To prevent that, the created date would be used to limit
-        // the validity period to a few secs.  Assuming they could also
-        // time their fake signin to be coincident with the signin of 
-        // the real user then consider adding something 
-        // about this client ID, such as browser's IP address and 
-        // other browser data?  
-        //
-        // HOWEVER, could avoid practically any
-        // issues with changes to a session's nonce by requiring
-        // https in the redirected callback from the browser to the server
-        // (as is already the case for the browser-to-provider connection).
-        // That, combined with a reasonable validity period (in case they try
-        // to decrypt the https session, etc.), should be sufficient.
-        // (Note that the embedded state is being stringified twice)
-        var jsonPkg = JSON.stringify(statePkg);
-        return jsonPkg;
+        this.r.table('authState').insert(statePkg).run(function (err, res) {
+            if (err) {
+                console.error("Inserting authState received error: " + err);
+            }
+            if (res && res.generated_keys && res.generated_keys.length > 0) {
+                done(res.generated_keys[0]);
+            }
+            else {
+                done('');
+            }
+        });
     };
-    LHSessionMgr.prototype._parseStatePkg = function (jsonPkg) {
-        if (!jsonPkg) {
-            return STATE_DATA_DFLT;
+    LHSessionMgr.prototype._getAuthState = function (stateId, done) {
+        if (!stateId || stateId.length <= 0) {
+            done(STATE_DATA_DFLT);
+            return;
         }
-        var statePkg = JSON.parse(jsonPkg);
-        if (statePkg.h != md5(statePkg.n + ':' + statePkg.d + ':' + this.secret)) {
-            console.error("LHIdentityServer: Validation check failed for: ", statePkg.d, statePkg.n, statePkg.h);
-            return STATE_DATA_DFLT;
-        }
-        // TODO: check that nonce in in globals database, and hasn't been used, 
-        // then set used flag
-        return JSON.parse(statePkg.d);
+        this.r.table('authState').get(stateId).run(function (err, statePkg) {
+            if (err || !statePkg) {
+                console.error("getAuthState failed with error: " + err);
+                done(null);
+                return;
+            }
+            if (statePkg.used != null) {
+                console.error("Attempt to reuse an authState document, stateId " + stateId);
+                done(null);
+            }
+            else {
+                // Just do update in parallel (could check for update conflict, 
+                // but probably overkill)
+                this.r.table('authState').get(stateId).update({ used: new Date() }).run();
+                done(statePkg.data);
+            }
+        });
     };
     // Handle authentication callback.
     // request object passed as first parameter due to passReqToCallback setting above
     LHSessionMgr.prototype._handleAuthentication = function (req, accessToken, refreshToken, authProfile, done) {
         var _this = this;
         var _r = this.r;
-        var jsonStatePkg = req.query ? req.query.state : null;
-        var stateData = this._parseStatePkg(jsonStatePkg);
-        if (stateData.r) {
-            // Remember me flag
-            req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 1 month
-        }
-        process.nextTick(function () {
-            // Special case for google (passport-google plugin is apparently missing this)
-            if (!authProfile.profileUrl && authProfile._json.url) {
-                authProfile.profileUrl = authProfile._json.url;
+        var stateId = req.query ? req.query.state : null;
+        this._getAuthState(stateId, function (stateData) {
+            if (stateData && (stateData.r == 1)) {
+                // Remember me flag
+                req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 1 month
             }
-            console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider + " with remember me " + stateData.r);
-            var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
-            //
-            // First, check whether this user already has a listing from this provider
-            //
-            _r.table('authProviders').get(providerIdStr).run().then(function (match) {
-                if (match) {
-                    // Assemble the full user document
-                    return _this.getUser(match.userId);
+            process.nextTick(function () {
+                // Special case for google (passport-google plugin is apparently missing this)
+                if (!authProfile.profileUrl && authProfile._json.url) {
+                    authProfile.profileUrl = authProfile._json.url;
                 }
-                else {
-                    // Look for a match for this user with another provider
-                    return _this._seekUserMatch(authProfile);
-                }
-            }).then(function (user) {
-                if (user) {
-                    return user;
-                }
-                else {
-                    // Unable to lookup or match to existing user, so create a new one
-                    return _this._createUser(authProfile);
-                }
-            }).then(function (user) {
-                return done(null, user);
-            }).error(function (err) {
-                console.error("Getting user returned error", err);
-                return done(null, null);
+                console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider + " with remember me " + (stateData ? stateData.r : 0));
+                var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
+                //
+                // First, check whether this user already has a listing from this provider
+                //
+                _r.table('authProviders').get(providerIdStr).run().then(function (match) {
+                    if (match) {
+                        // Assemble the full user document
+                        return _this.getUser(match.userId);
+                    }
+                    else {
+                        // Look for a match for this user with another provider
+                        return _this._seekUserMatch(authProfile);
+                    }
+                }).then(function (user) {
+                    if (user) {
+                        return user;
+                    }
+                    else {
+                        // Unable to lookup or match to existing user, so create a new one
+                        return _this._createUser(authProfile);
+                    }
+                }).then(function (user) {
+                    return done(null, user);
+                }).error(function (err) {
+                    console.error("Getting user returned error", err);
+                    return done(null, null);
+                });
             });
         });
     };
