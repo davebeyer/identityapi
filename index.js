@@ -227,6 +227,7 @@ var LHSessionMgr = (function () {
             return _r.table('users').insert({
                 id: 99,
                 created: new Date(),
+                active: true
             });
         }).finally(function () {
             console.log("initDB: About to create authState table");
@@ -410,8 +411,7 @@ var LHSessionMgr = (function () {
                         return _this.getUser(match.userId);
                     }
                     else {
-                        // Look for a match for this user with another provider
-                        return _this._seekUserMatch(authProfile);
+                        return null;
                     }
                 }).then(function (user) {
                     if (user) {
@@ -430,43 +430,78 @@ var LHSessionMgr = (function () {
             });
         });
     };
-    LHSessionMgr.prototype._seekUserMatch = function (authProfile) {
+    // Assumes that providerInfo list has been attached to the 
+    // user document at this point
+    LHSessionMgr.prototype._attachUserMatches = function (user) {
         var _this = this;
         var _r = this.r;
+        var i, j;
         return new Promise(function (resolve, reject) {
-            if (!authProfile.emails) {
-                resolve(null); // no matches
-                return;
+            var emails = [];
+            var email;
+            for (i = 0; i < user.providerInfo.length; i++) {
+                if (user.providerInfo[i].emails) {
+                    for (j = 0; j < user.providerInfo[i].emails.length; j++) {
+                        var email = user.providerInfo[i].emails[j].value;
+                        if (!_this._listContains(emails, email, { caseInsensitive: true }))
+                            emails.push(email.toLowerCase());
+                    }
+                }
             }
-            var emails = authProfile.emails.map(function (emailRow) {
-                return emailRow['value'].toLowerCase();
-            });
             // Search for all authProvider documents which match any of the emails in this authProfile
             _r.table('authProviders').getAll(_r.args(emails), { index: 'emailIndex' }).run().then(function (matches) {
-                if (!matches || matches.length <= 0) {
-                    return null;
+                var matchedUserIds = [];
+                if (matches) {
+                    for (j = 0; j < matches.length; j++) {
+                        if (matches[j].userId != user.id) {
+                            matchedUserIds.push(matches[j].userId);
+                        }
+                    }
                 }
-                else {
-                    // merge this user with the first match
-                    // TODO: ASK USER BEFORE MERGING
-                    // So first, get the user
-                    return _this.getUser(matches[0].userId);
+                var matchId;
+                var changeFlag = false;
+                if (!user.matches) {
+                    user.matches = {};
                 }
-            }).then(function (user) {
-                if (user) {
-                    // Then, create the new authProvider, and add to this user
-                    return _this._createAuthProviderForUser(user, authProfile);
+                for (j = 0; j < matchedUserIds.length; j++) {
+                    matchId = matchedUserIds[j];
+                    if (!_this._listContains(user.matches.pending, matchId) &&
+                        !_this._listContains(user.matches.rejected, matchId) &&
+                        !_this._listContains(user.matches.failed, matchId)) {
+                        if (!user.matches.pending) {
+                            user.matches.pending = [];
+                        }
+                        user.matches.pending.push(matchId);
+                        changeFlag = true;
+                    }
                 }
-            }).then(function (user) {
-                // return
-                resolve(user); // may be null (if none could be found originally)
-            }).catch(function (err) {
-                var msg = "_seekUserMatch: failed with error: " + err;
-                console.error(err);
-                reject(err);
+                if (!changeFlag) {
+                    resolve(user); // unchanged
+                    return;
+                }
+                this.r.table('users').get(user.id).update({ matches: user.matches }).run(function (err, res) {
+                    if (err) {
+                        console.error("_attachUserMatches: received error when updating user with matches: ", user.id, user);
+                    }
+                    resolve(user); // changes set above (should be same as that stored in DB, assuming no error
+                    return;
+                });
             });
         });
     };
+    //             }).then(function(user) {
+    //                 if (user) {
+    //                     // Then, create the new authProvider, and add to this user
+    //                     return _this._createAuthProviderForUser(user, authProfile);
+    //                 }
+    //             }).then(function(user) {
+    //                 // return
+    //                 resolve(user);  // may be null (if none could be found originally)
+    //             }).catch(function(err) {
+    //                 var msg = "_attachUserMatches: failed with error: " + err;
+    //                 console.error(err);
+    //                 reject(err);
+    //            });
     LHSessionMgr.prototype._createUser = function (info) {
         var _this = this;
         var _r = this.r;
@@ -483,11 +518,18 @@ var LHSessionMgr = (function () {
                 console.log("About to create new user doc");
                 user = {
                     id: FIRST_USERID + res.changes[0].new_val['value'],
-                    created: new Date()
+                    created: new Date(),
+                    active: true
                 };
                 return _r.table('users').insert(user).run();
             }).then(function (res) {
                 return _this._createAuthProviderForUser(user, info);
+            }).then(function (user) {
+                // In this case of creating a new user, check to see whether 
+                // there are other potential matches that should be presented
+                // to the user for possible merging (and if so, add those to the 
+                // user document)
+                return _this._attachUserMatches(user); // has providerInfo attached
             }).then(function (user) {
                 resolve(user);
             }).catch(function (err) {
@@ -584,15 +626,21 @@ var LHSessionMgr = (function () {
             }
         }
     };
-    LHSessionMgr.prototype._listContains = function (destList, newStr, options) {
-        if (options.caseInsensitive) {
-            newStr = newStr.toLowerCase();
+    LHSessionMgr.prototype._listContains = function (itemList, item, options) {
+        if (!itemList) {
+            return false;
         }
-        for (var i = 0; i < destList.length; i++) {
+        if (options.caseInsensitive) {
+            item = item.toLowerCase();
+        }
+        for (var i = 0; i < itemList.length; i++) {
             if (options.caseInsensitive) {
-                if (destList[i].toLowerCase() == newStr) {
+                if (itemList[i].toLowerCase() == item) {
                     return true;
                 }
+            }
+            else if (itemList[i] == item) {
+                return true;
             }
         }
         return false;
