@@ -2,7 +2,7 @@
 
 const FIRST_USERID    = 100;
 const DB_NAME         = 'UserIdentities';
-const STATE_DATA_DFLT = {r : 0};
+const STATE_DATA_DFLT = {rememberMe : false};
 
 var passport         = require('passport');
 var session          = require('express-session');
@@ -328,6 +328,7 @@ export class LHSessionMgr {
             console.log("initDB: About to insert dummy authProvider entry");
             return _r.table('authProviders').insert({
                 id           : 'lh:99',
+		created      : new Date(),
                 userId       : 99,
 
                 provider     : 'lh',
@@ -338,7 +339,8 @@ export class LHSessionMgr {
 
                 lastSignin   : null,
 
-                emails       : ['dummy1@example.com', 'DUMMY2@example.com'],
+                emails       : [{value : 'dummy1@example.com'},
+				{value : 'DUMMY2@example.com'} ],
 
                 displayName  : 'Dummy User',
                 name         : {
@@ -364,13 +366,18 @@ export class LHSessionMgr {
         }).finally(function() {
             console.log("initDB: About to create emailIndex");
             return _r.table('authProviders').indexCreate('emailIndex', 
+							 // Use .map() to translate the 'emails' array
                                                          _r.row('emails').map(function(email) 
                                                          {
+							     // Get nested field using function call
+							     // 'email' here.  Then, 
                                                              // need to use expr() to convert to an object that 
                                                              // ReQL commands can operate on
-                                                             return _r.expr(email).downcase();
+                                                             return _r.expr(email('value')).downcase();
                                                          }),
                                                          {multi: true}).run();
+        }).error(function(err) {
+            console.log("initDB: Error creating emailIndex: ", err);
 
         }).finally(function() {
             console.log("initDB: About to wait for emailIndex");
@@ -401,7 +408,8 @@ export class LHSessionMgr {
                     console.log(`/signin/${provider}, authenticating with remember me = ${rememberMe}`);
 
                     var stateData = {
-                        r : rememberMe
+                        rememberMe : rememberMe == 1 ? true : false,
+			provider   : provider
                     };
 
                     _this._saveAuthState(stateData, function(stateId) {
@@ -508,7 +516,7 @@ export class LHSessionMgr {
 
         this._getAuthState(stateId, function(stateData) {
 
-            if (stateData && (stateData.r == 1)) {
+            if (stateData && stateData.rememberMe) {
                 // Remember me flag
                 req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000;   // 1 month
             }
@@ -520,7 +528,7 @@ export class LHSessionMgr {
                     authProfile.profileUrl = authProfile._json.url;
                 }
 
-                console.log(`Successfully authenticated ${authProfile.displayName} using ${authProfile.provider} with remember me ${stateData ? stateData.r : 0}`);
+                console.log(`Successfully authenticated ${authProfile.displayName} using ${authProfile.provider} with remember me ${stateData ? stateData.rememberMe : 0}`);
 
                 var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
 
@@ -566,10 +574,9 @@ export class LHSessionMgr {
                 return;
             }
 
-            var emails = [];
-            for (var i = 0; i < authProfile.emails.length; i++) {
-                emails.push( authProfile.emails[i]['value'].toLowerCase() );
-            }
+            var emails = authProfile.emails.map(function(emailRow) {
+		return emailRow['value'].toLowerCase();
+	    });
 
             // Search for all authProvider documents which match any of the emails in this authProfile
             _r.table('authProviders').getAll(_r.args(emails), {index : 'emailIndex'}).run().then(function(matches) {
@@ -653,31 +660,18 @@ export class LHSessionMgr {
 
             console.log("About to create new authProvider for user");
 
-            var i;
+	    var created = new Date();
 
-            var emails = [];
-            if (info.emails) {
-                for (i = 0; i < info.emails.length; i++) {
-                    emails.push(info.emails[i].value);
-                }
-            }
-
-            var photos = [];
-            if (info.photos) {
-                for (i = 0; i < info.photos.length; i++) {
-                    photos.push(info.photos[i].value);
-                }
-            }
-                
             providerInfo = {
                 id           : _this._providerIdStr(info.provider,info.id),
+		created      : created,
                 userId       : user.id,
                 provider     : info.provider,
                 providerId   : info.id,
                 username     : info.username,
                 passwordHash : null,
-                lastSignin   : new Date(),
-                emails       : emails,
+                lastSignin   : created,
+                emails       : info.emails,
                 displayName  : info.displayName,
                 name : {
                     familyName : info.name.familyName,
@@ -721,8 +715,10 @@ export class LHSessionMgr {
 
             if (info.emails) {
                 if (!user.emails) { user.emails = []; }
+		var compareList = user.emails.map(function(emailRow) { return emailRow.value; } );
+
                 for (j = 0; j < info.emails.length; j++) {
-                    if (! this._listContains(user.emails, info.emails[j], {caseInsensitive : true}) ) {
+                    if (! this._listContains(compareList, info.emails[j].value, {caseInsensitive : true}) ) {
                         user.emails.push(info.emails[j]);
                     }
                 }
