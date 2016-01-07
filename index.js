@@ -147,18 +147,59 @@ var LHSessionMgr = (function () {
         }
     };
     LHSessionMgr.prototype.signinOptions = function () {
-        var res = {};
+        var providers = [];
         if (this.authConfig.facebook) {
-            res['facebook'] = {
-                'signinUrl': this._signinURL('facebook')
-            };
+            providers.push({ provider: 'facebook',
+                signinUrl: this._signinURL('facebook') });
         }
         if (this.authConfig.google) {
-            res['google'] = {
-                'signinUrl': this._signinURL('google')
-            };
+            providers.push({ provider: 'google',
+                signinUrl: this._signinURL('google') });
         }
-        return res;
+        return { providers: providers };
+    };
+    LHSessionMgr.prototype.mergeOptions = function (req) {
+        var _this = this;
+        return new Promise(function (resolve, reject) {
+            if (!req || !req.user || !req.user.matches) {
+                return null;
+            }
+            var pendingUserIds = req.user.matches.pending;
+            if (!pendingUserIds || pendingUserIds.length <= 0) {
+                return null;
+            }
+            var pList = [];
+            var i, j;
+            // TODO: could consider making this more efficient, but at least for now, 
+            //        get one user at a time (typical case is there will only be a 
+            //        single user to merge)
+            for (i = 0; i < pendingUserIds.length; i++) {
+                pList.push(_this.getUser(pendingUserIds[i]));
+            }
+            return Promise.all(pList).then(function (matches) {
+                var options = {
+                    rejectUrl: _this.authPath + '/merge/reject',
+                    postponeUrl: _this.authPath + '/merge/postpone',
+                    matches: []
+                };
+                var matchesDict = {};
+                for (i = 0; i < matches.length; i++) {
+                    var providerInfo = matches[i].providerInfo ? matches[i].providerInfo : [];
+                    for (j = 0; j < providerInfo.length; j++) {
+                        var infoId = providerInfo[j].id;
+                        if (!(infoId in matchesDict)) {
+                            providerInfo[j]['mergeUrl'] = _this.authPath + '/merge/' + providerInfo[j].provider + '?uid=' + providerInfo[j].userId;
+                            options.matches.push(providerInfo[j]);
+                            matchesDict[infoId] = true;
+                        }
+                    }
+                }
+                resolve(options);
+            }).catch(function (err) {
+                console.error("mergeOptions: failed to get matching users with error: ", err);
+                resolve(null);
+            });
+        });
     };
     LHSessionMgr.prototype.signout = function (req) {
         req.logout();
@@ -169,6 +210,44 @@ var LHSessionMgr = (function () {
             return req['user'].id;
         }
         return null;
+    };
+    LHSessionMgr.prototype.pendingMatches = function (req) {
+        var _this = this;
+        return new Promise(function (resolve, reject) {
+            if (!req || !req.user || !req.user.matches) {
+                resolve([]);
+                return;
+            }
+            var changeFlag = false;
+            var matches = req.user.matches;
+            var matchedUserIds = [];
+            if (matches.pending && matches.pending.length > 0) {
+                matchedUserIds = matches.pending;
+            }
+            if (matches.postponed && matches.postponed.length > 0) {
+                if (matches.postponedUntil >= new Date()) {
+                    // Add to matchedUserIds 
+                    matchedUserIds = matchedUserIds.concat(matches.postponed);
+                    // Update user record
+                    req.user.matches.pending = matchedUserIds;
+                    req.user.matches.postponed = null;
+                    req.user.matches.postponedUntil = null;
+                    // Mark to update database.
+                    changeFlag = true;
+                }
+            }
+            if (!changeFlag) {
+                resolve(matchedUserIds);
+            }
+            else {
+                _this.r.table('users').get(req.user.id).update({ matches: req.user.matches }).run(function (err, res) {
+                    if (err) {
+                        console.error("pendingMatches: received error when updating user with matches: ", req.user.id, req.user);
+                    }
+                    resolve(matchedUserIds);
+                });
+            }
+        });
     };
     LHSessionMgr.prototype.getUser = function (userId) {
         var _this = this;
@@ -362,11 +441,12 @@ var LHSessionMgr = (function () {
         });
     };
     LHSessionMgr.prototype._getAuthState = function (stateId, done) {
+        var _this = this;
         if (!stateId || stateId.length <= 0) {
             done(STATE_DATA_DFLT);
             return;
         }
-        this.r.table('authState').get(stateId).run(function (err, statePkg) {
+        _this.r.table('authState').get(stateId).run(function (err, statePkg) {
             if (err || !statePkg) {
                 console.error("getAuthState failed with error: " + err);
                 done(null);
@@ -379,7 +459,7 @@ var LHSessionMgr = (function () {
             else {
                 // Just do update in parallel (could check for update conflict, 
                 // but probably overkill)
-                this.r.table('authState').get(stateId).update({ used: new Date() }).run();
+                _this.r.table('authState').get(stateId).update({ used: new Date() }).run();
                 done(statePkg.data);
             }
         });
@@ -467,6 +547,7 @@ var LHSessionMgr = (function () {
                     matchId = matchedUserIds[j];
                     if (!_this._listContains(user.matches.pending, matchId) &&
                         !_this._listContains(user.matches.rejected, matchId) &&
+                        !_this._listContains(user.matches.postponed, matchId) &&
                         !_this._listContains(user.matches.failed, matchId)) {
                         if (!user.matches.pending) {
                             user.matches.pending = [];
@@ -479,7 +560,7 @@ var LHSessionMgr = (function () {
                     resolve(user); // unchanged
                     return;
                 }
-                this.r.table('users').get(user.id).update({ matches: user.matches }).run(function (err, res) {
+                _this.r.table('users').get(user.id).update({ matches: user.matches }).run(function (err, res) {
                     if (err) {
                         console.error("_attachUserMatches: received error when updating user with matches: ", user.id, user);
                     }
