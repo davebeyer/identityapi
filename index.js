@@ -176,38 +176,38 @@ var LHSessionMgr = (function () {
             for (i = 0; i < pendingUserIds.length; i++) {
                 pList.push(_this.getUser(pendingUserIds[i]));
             }
-            return Promise.all(pList).then(function (matches) {
-                var options = {
-                    rejectUrl: _this.authPath + '/merge/reject',
-                    postponeUrl: _this.authPath + '/merge/postpone',
-                    matches: []
-                };
-                var matchesDict = {};
-                for (i = 0; i < matches.length; i++) {
-                    var providerInfo = matches[i].providerInfo ? matches[i].providerInfo : [];
+            var options = {
+                rejectUrl: _this.authPath + '/merge/reject',
+                postponeUrl: _this.authPath + '/merge/postpone',
+                matches: []
+            };
+            return Promise.all(pList).then(function (pendings) {
+                var pendingsDict = {};
+                for (i = 0; i < pendings.length; i++) {
+                    var providerInfo = pendings[i].providerInfo ? pendings[i].providerInfo : [];
                     for (j = 0; j < providerInfo.length; j++) {
                         var infoId = providerInfo[j].id;
-                        if (!(infoId in matchesDict)) {
+                        if (!(infoId in pendingsDict)) {
                             providerInfo[j]['mergeUrl'] = _this.authPath + '/merge/' + providerInfo[j].provider + '?uid=' + providerInfo[j].userId;
                             options.matches.push(providerInfo[j]);
-                            matchesDict[infoId] = true;
+                            pendingsDict[infoId] = true;
                         }
                     }
                 }
                 resolve(options);
             }).catch(function (err) {
                 console.error("mergeOptions: failed to get matching users with error: ", err);
-                resolve(null);
+                resolve(options); // return with no match options (to allow user to skip/reject)
             });
         });
     };
     LHSessionMgr.prototype.signout = function (req) {
         req.logout();
     };
-    LHSessionMgr.prototype.currentUserId = function (req) {
+    LHSessionMgr.prototype.currentUser = function (req) {
         if (req.isAuthenticated()) {
             // TODO: is this the proper way?
-            return req['user'].id;
+            return req['user'];
         }
         return null;
     };
@@ -263,7 +263,7 @@ var LHSessionMgr = (function () {
                     if (user) {
                         msg = "user found but no authProviders for userId: " + userId;
                     }
-                    if (authInfo) {
+                    if (authInfo && authInfo.length > 0) {
                         msg = "authProviders found but no user for userId: " + userId;
                     }
                     console.error(msg);
@@ -372,34 +372,32 @@ var LHSessionMgr = (function () {
         //   redirect the user back to this application at /<authPath>/<provider>/callback
         //   (Note, this callback must be one of the valid callbacks for this Lighthouse
         //   Identity Server in the provider's application configuration security settings).
-        var authenticateFn;
         app.get(_this._signinURL(provider), function (req, res, next) {
             var rememberMe = req.query && req.query.remember ? parseInt(req.query.remember) : 0;
-            console.log("/signin/" + provider + ", authenticating with remember me = " + rememberMe);
+            console.log("signin for " + provider + ", authenticating with remember me = " + rememberMe);
             var stateData = {
-                rememberMe: rememberMe == 1 ? true : false,
-                provider: provider
+                provider: provider,
+                type: 'signin',
+                rememberMe: rememberMe == 1 ? true : false
             };
-            _this._saveAuthState(stateData, function (stateId) {
-                if (provider === 'google') {
-                    // Special case for Google
-                    authenticateFn = passport.authenticate(provider, {
-                        scope: ['openid email profile'],
-                        state: stateId
-                    });
-                }
-                else {
-                    // All others
-                    authenticateFn = passport.authenticate(provider, {
-                        scope: ['email'],
-                        state: stateId
-                    });
-                }
-                return authenticateFn(req, res, next);
-            });
-            return null; // IS THIS THE RIGHT RETURN VALUE HERE, INDICATING STILL PROCESSING?
+            _this._providerSignin(stateData, req, res, next);
         }, function (req, res) {
-            console.log("/signin/" + provider + ", in redirect !?");
+            console.log("signin for " + provider + ", in redirect !?");
+            // The request will be redirected to the provider for authentication, 
+            // so this function will not be called.
+        });
+        app.get(_this._mergeURL(provider), function (req, res, next) {
+            var srcUserId = req.query && req.query.uid ? parseInt(req.query.uid) : null;
+            console.log("/auth/merge/" + provider + ", authenticating for srcUserId = " + srcUserId);
+            var stateData = {
+                provider: provider,
+                type: 'merge',
+                srcUserId: srcUserId,
+                rememberMe: false
+            };
+            _this._providerSignin(stateData, req, res, next);
+        }, function (req, res) {
+            console.log("/auth/merge/" + provider + ", in redirect !?");
             // The request will be redirected to the provider for authentication, 
             // so this function will not be called.
         });
@@ -418,10 +416,28 @@ var LHSessionMgr = (function () {
         });
     };
     ;
+    LHSessionMgr.prototype._providerSignin = function (stateData, req, res, next) {
+        var provider = stateData.provider;
+        this._saveAuthState(stateData, function (stateId) {
+            var authenticateFn;
+            if (provider === 'google') {
+                // Special case for Google
+                authenticateFn = passport.authenticate(provider, {
+                    scope: ['openid email profile'],
+                    state: stateId
+                });
+            }
+            else {
+                // All others
+                authenticateFn = passport.authenticate(provider, {
+                    scope: ['email'],
+                    state: stateId
+                });
+            }
+            return authenticateFn(req, res, next);
+        });
+    };
     LHSessionMgr.prototype._saveAuthState = function (data, done) {
-        if (!data) {
-            data = STATE_DATA_DFLT;
-        }
         var statePkg = {
             // id   : <random UUID auto-assigned>
             data: data,
@@ -465,48 +481,106 @@ var LHSessionMgr = (function () {
         });
     };
     // Handle authentication callback.
+    //
     // request object passed as first parameter due to passReqToCallback setting above
+    // This is registered with the Facebook and GoogleStrategy objects, and is called
+    // during passport's handling of the authentication callback that the provider redirects
+    // the browser to.
     LHSessionMgr.prototype._handleAuthentication = function (req, accessToken, refreshToken, authProfile, done) {
         var _this = this;
         var _r = this.r;
         var stateId = req.query ? req.query.state : null;
         this._getAuthState(stateId, function (stateData) {
-            if (stateData && stateData.rememberMe) {
+            if (!stateData) {
+                stateData = {};
+            }
+            if (stateData.type == 'signin' && stateData.rememberMe) {
                 // Remember me flag
                 req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 1 month
             }
             process.nextTick(function () {
-                // Special case for google (passport-google plugin is apparently missing this)
-                if (!authProfile.profileUrl && authProfile._json.url) {
-                    authProfile.profileUrl = authProfile._json.url;
+                if (stateData.type == 'merge') {
+                    //
+                    // Handle merge
+                    //
+                    var dstUserId = req.user.id;
+                    var srcUserId = stateData.srcUserId;
+                    var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
+                    console.log("Successful signin to " + authProfile.displayName + " using " + authProfile.provider + " for merge of " + srcUserId + " into " + dstUserId);
+                    _r.table('authProviders').get(providerIdStr).run().then(function (match) {
+                        if (match) {
+                            // Assemble the full user document
+                            return _this.getUser(match.userId);
+                        }
+                        else {
+                            return null;
+                        }
+                    }).then(function (user) {
+                        if (!user) {
+                            console.error("Unable to get source user " + srcUserId + " for merge, no user for provider id " + providerIdStr);
+                            return null;
+                        }
+                        if (user.id != srcUserId) {
+                            console.error("Unable to get source user " + srcUserId + " for merge, user just authenticated with " + providerIdStr + " which has userId " + user.id);
+                            return null;
+                        }
+                        // We have the correct destination user!   So, now change the original 
+                        // user info to merge into this destination user.
+                        return _this._mergeUsers(user, req.user);
+                    }).then(function (user) {
+                        // resolve with new user (should be set to the destination user,
+                        // which will be the current user that we're signed in as (so user
+                        // doesn't need to resign in), and will be modified with the new
+                        // provider Info
+                        done(null, user);
+                    }).catch(function (err) {
+                        if (err) {
+                            console.error("Merge failed with error", err);
+                        }
+                        // Just leave current user with the original user, and user.matches as is
+                        // (so user will be presented with merging choices again)
+                        done(null, req.user);
+                    });
                 }
-                console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider + " with remember me " + (stateData ? stateData.rememberMe : 0));
-                var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
-                //
-                // First, check whether this user already has a listing from this provider
-                //
-                _r.table('authProviders').get(providerIdStr).run().then(function (match) {
-                    if (match) {
-                        // Assemble the full user document
-                        return _this.getUser(match.userId);
+                else {
+                    //
+                    // Handle signin
+                    //
+                    // Special case for google (passport-google plugin is apparently missing this)
+                    if (!authProfile.profileUrl && authProfile._json.url) {
+                        authProfile.profileUrl = authProfile._json.url;
                     }
-                    else {
-                        return null;
-                    }
-                }).then(function (user) {
-                    if (user) {
-                        return user;
-                    }
-                    else {
-                        // Unable to lookup or match to existing user, so create a new one
-                        return _this._createUser(authProfile);
-                    }
-                }).then(function (user) {
-                    return done(null, user);
-                }).error(function (err) {
-                    console.error("Getting user returned error", err);
-                    return done(null, null);
-                });
+                    console.log("Successfully authenticated " + authProfile.displayName + " using " + authProfile.provider + " with remember me " + (stateData ? stateData.rememberMe : 0));
+                    var providerIdStr = _this._providerIdStr(authProfile.provider, authProfile.id);
+                    //
+                    // First, check whether this user already has a listing from this provider
+                    //
+                    _r.table('authProviders').get(providerIdStr).run().then(function (match) {
+                        if (match) {
+                            // Assemble the full user document
+                            return _this.getUser(match.userId);
+                        }
+                        else {
+                            return null;
+                        }
+                    }).then(function (user) {
+                        if (user) {
+                            // Update lastSignin 
+                            _r.table('authProviders').get(providerIdStr).update({ lastSignin: new Date() }).run();
+                            // but no need to wait for it
+                            return user;
+                        }
+                        else {
+                            // Unable to lookup an existing user, so create a new one
+                            return _this._createUser(authProfile);
+                        }
+                    }).then(function (user) {
+                        return done(null, user);
+                    }).error(function (err) {
+                        console.error("Getting user returned error", err);
+                        return done(null, null);
+                    });
+                }
             });
         });
     };
@@ -570,19 +644,6 @@ var LHSessionMgr = (function () {
             });
         });
     };
-    //             }).then(function(user) {
-    //                 if (user) {
-    //                     // Then, create the new authProvider, and add to this user
-    //                     return _this._createAuthProviderForUser(user, authProfile);
-    //                 }
-    //             }).then(function(user) {
-    //                 // return
-    //                 resolve(user);  // may be null (if none could be found originally)
-    //             }).catch(function(err) {
-    //                 var msg = "_attachUserMatches: failed with error: " + err;
-    //                 console.error(err);
-    //                 reject(err);
-    //            });
     LHSessionMgr.prototype._createUser = function (info) {
         var _this = this;
         var _r = this.r;
@@ -707,6 +768,73 @@ var LHSessionMgr = (function () {
             }
         }
     };
+    LHSessionMgr.prototype._mergeUsers = function (srcUser, dstUser) {
+        var _this = this;
+        var _r = this.r;
+        //
+        // BTW, don't switch src/dst users, according to which is oldest for instance.
+        // Just merge into the dstUser, which is the one the user is currently signed in
+        // so that the user doesn't need to re-signin after this is done
+        //
+        return new Promise(function (resolve, reject) {
+            var pList = [];
+            var newProm;
+            var i;
+            // Update any/all src user's authProvider docs to point to new, 
+            // destination user and add these to the new dst user record
+            for (i = 0; i < srcUser.providerInfo.length; i++) {
+                var info = srcUser.providerInfo[i];
+                newProm = _r.table('authProviders').get(info.id).update({ userId: dstUser.id }).run();
+                pList.push(newProm);
+                if (!dstUser.providerInfo) {
+                    dstUser.providerInfo = [];
+                }
+                info.userId = dstUser.id;
+                dstUser.providerInfo.push(info);
+            }
+            // Consolidate provider info in user object
+            _this._consolidateProviderInfo(dstUser);
+            // Update srcUser users document to be inactive 
+            // and remove this pending from matches, if there
+            if (srcUser.matches && srcUser.matches.pending) {
+                i = srcUser.matches.pending.indexOf(dstUser.id);
+                if (i > -1) {
+                    // Remove this element
+                    srcUser.matches.pending.splice(i, 1);
+                }
+            }
+            newProm = _r.table('users').get(srcUser.id).update({
+                active: false,
+                merged: new Date(),
+                mergedInto: dstUser.id,
+                matches: srcUser.matches
+            }).run();
+            pList.push(newProm);
+            // Update dstUser users document to remove this pending, if there
+            if (dstUser.matches && dstUser.matches.pending) {
+                i = dstUser.matches.pending.indexOf(srcUser.id);
+                if (i > -1) {
+                    // Remove this element
+                    dstUser.matches.pending.splice(i, 1);
+                    newProm = _r.table('users').get(dstUser.id).update({
+                        matches: dstUser.matches
+                    }).run();
+                    pList.push(newProm);
+                }
+            }
+            // Wait for all of above to complete
+            Promise.all(pList).then(function (results) {
+                console.log("Finished user merge of " + srcUser.id + " into  " + dstUser.id);
+                resolve(dstUser);
+            }).catch(function (err) {
+                console.error("User merge failed trying to merge " + srcUser.id + " into " + dstUser.id);
+                resolve(dstUser);
+            });
+        });
+    };
+    //
+    // Convenience methods
+    //
     LHSessionMgr.prototype._listContains = function (itemList, item, options) {
         if (!itemList) {
             return false;
@@ -728,6 +856,9 @@ var LHSessionMgr = (function () {
     };
     LHSessionMgr.prototype._signinURL = function (provider) {
         return this.authPath + '/' + provider;
+    };
+    LHSessionMgr.prototype._mergeURL = function (provider) {
+        return this.authPath + '/merge/' + provider;
     };
     LHSessionMgr.prototype._callbackURL = function (provider) {
         return this.authPath + '/' + provider + '/callback';
