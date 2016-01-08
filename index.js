@@ -32,7 +32,7 @@ var LHSessionMgr = (function () {
             servers: [{ host: this.dbHost, port: this.dbPort }],
             db: DB_NAME
         });
-        if (true || options.initDatabase) {
+        if (options.initDatabase) {
             this._initDB();
         }
         //

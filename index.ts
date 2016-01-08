@@ -60,7 +60,7 @@ export class LHSessionMgr {
             db      : DB_NAME
         }); 
 
-        if (true || options.initDatabase) {
+        if (options.initDatabase) {
             this._initDB();
         }
 
