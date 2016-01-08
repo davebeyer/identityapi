@@ -638,6 +638,7 @@ var LHSessionMgr = (function () {
                 if (!user.matches) {
                     user.matches = {};
                 }
+                // TODO: ADD PENDING TO OTHER USER DOC TOO!
                 for (j = 0; j < matchedUserIds.length; j++) {
                     matchId = matchedUserIds[j];
                     if (_this._getUserMatchTypesForId(user, matchId).length == 0) {

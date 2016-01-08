@@ -819,6 +819,8 @@ export class LHSessionMgr {
                     user.matches = {};
                 }
 
+		// TODO: ADD PENDING TO OTHER USER DOC TOO!
+
                 for (j = 0; j < matchedUserIds.length; j++) {
                     matchId = matchedUserIds[j];
 
