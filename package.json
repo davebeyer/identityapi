@@ -15,8 +15,7 @@
   "license": "SEE LICENSE IN LICENSE.txt",
   "dependencies": {
     "express-session": "^1.12.1",
-    "md5": "^2.0.0",
-    "nonce": "^1.0.3",
+    "moment": "^2.11.0",
     "passport": "^0.2.1",
     "passport-facebook": "^2.0.0",
     "passport-google-oauth": "^0.2.0",

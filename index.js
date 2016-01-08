@@ -3,11 +3,10 @@ var FIRST_USERID = 100;
 var DB_NAME = 'UserIdentities';
 var STATE_DATA_DFLT = { rememberMe: false };
 var USER_MATCH_TYPES = ['pending', 'rejected', 'failed', 'postponed'];
+var moment = require('moment');
 var passport = require('passport');
 var session = require('express-session');
 var SessionStore = require('express-session-rethinkdb')(session);
-var nonce = require('nonce')(10);
-var md5 = require('md5');
 var FacebookStrategy = require('passport-facebook').Strategy;
 var GoogleStrategy = require('passport-google-oauth').OAuth2Strategy;
 //
@@ -22,7 +21,7 @@ var LHSessionMgr = (function () {
         this.authConfig = authConfig;
         this.authPath = options.authPath || "/auth";
         this.successPath = options.successPath || '/';
-        this.failurePath = options.failurePath || this.authPath + '/signin';
+        this.signinPath = options.signinPath || this.authPath + '/signin';
         this.mergePath = options.mergePath || this.authPath + '/merge';
         this.dbHost = options.dbHost || 'localhost';
         this.dbPort = options.dbPort || 28035;
@@ -83,6 +82,7 @@ var LHSessionMgr = (function () {
         }
     }
     LHSessionMgr.prototype.register = function (app) {
+        var _this = this;
         //
         // Create session store manager
         // See: https://github.com/armenfilipetyan/express-session-rethinkdb
@@ -146,6 +146,46 @@ var LHSessionMgr = (function () {
         if (this.authConfig.google) {
             this._registerRoutes(app, 'google');
         }
+        //
+        // Register special merge routes
+        //
+        app.get(this.authPath + '/merge/reject', function (req, res, next) {
+            // Move all pending to rejected
+            if (_this._moveUserMatches(req.user, 'pending', 'rejected')) {
+                _this.r.table('users').get(req.user.id).update({
+                    matches: req.user.matches
+                }).run().then(function () {
+                    res.redirect(_this.successPath);
+                }).catch(function (err) {
+                    console.error("LHSessionMgr: failed rejecting user matches with error: ", err);
+                    res.redirect(_this.successPath);
+                });
+            }
+            else {
+                res.redirect(_this.successPath);
+            }
+            ;
+        });
+        app.get(this.authPath + '/merge/postpone', function (req, res, next) {
+            // Move all pending to rejected
+            if (_this._moveUserMatches(req.user, 'pending', 'postponed')) {
+                var now = moment(new Date());
+                now.add(1, 'day'); // tomorrow
+                req.user.matches['postponedUntil'] = now.toDate();
+                _this.r.table('users').get(req.user.id).update({
+                    matches: req.user.matches
+                }).run().then(function () {
+                    res.redirect(_this.successPath);
+                }).catch(function (err) {
+                    console.error("LHSessionMgr: failed rejecting user matches with error: ", err);
+                    res.redirect(_this.successPath);
+                });
+            }
+            else {
+                res.redirect(_this.successPath);
+            }
+            ;
+        });
     };
     LHSessionMgr.prototype.signinOptions = function () {
         var providers = [];
@@ -386,7 +426,7 @@ var LHSessionMgr = (function () {
         //   request.  If authentication fails, the user will be redirected back to the
         //   sign in page.  Otherwise, the primary route function function will be called,
         //   which, in this example, will redirect the user to the home page.
-        var callbackAuthFn = passport.authenticate(provider, { failureRedirect: _this.failurePath });
+        var callbackAuthFn = passport.authenticate(provider, { failureRedirect: _this.signinPath });
         app.get(_this._callbackURL(provider), function (req, res, next) {
             console.log("Authenticating callback for " + provider);
             return callbackAuthFn(req, res, next);
@@ -547,7 +587,8 @@ var LHSessionMgr = (function () {
                         if (user) {
                             // Update lastSignin 
                             _r.table('authProviders').get(providerIdStr).update({ lastSignin: new Date() }).run();
-                            // but no need to wait for it
+                            // but no need to wait for this one (not a big deal if there's a race
+                            // condition for this lastSignin date property)
                             return user;
                         }
                         else {
@@ -816,6 +857,30 @@ var LHSessionMgr = (function () {
             return true;
         }
     };
+    LHSessionMgr.prototype._moveUserMatches = function (user, fromType, toType) {
+        if (USER_MATCH_TYPES.indexOf(fromType) == -1) {
+            console.error("LHSessionMgr:_moveUserMatches - invalid from match type: ", fromType);
+            return false;
+        }
+        if (USER_MATCH_TYPES.indexOf(toType) == -1) {
+            console.error("LHSessionMgr:_moveUserMatches - invalid to match type: ", toType);
+            return false;
+        }
+        if (!user.matches) {
+            user.matches = {};
+        }
+        if (!user.matches[fromType] || user.matches[fromType].length <= 0) {
+            return false; // nothing to do
+        }
+        else {
+            if (!user.matches[toType]) {
+                user.matches[toType] = [];
+            }
+            user.matches[toType] = user.matches[toType].concat(user.matches[fromType]);
+            user.matches[fromType] = [];
+            return true;
+        }
+    };
     LHSessionMgr.prototype._getUserMatchTypesForId = function (user, userId) {
         if (!user || !user.matches) {
             return [];
@@ -848,15 +913,15 @@ var LHSessionMgr = (function () {
             // Update pendings with postponed if appropriate
             var changeFlag = false;
             if (!options.ignorePostponed) {
-                if (user.matches['postponed']) {
+                if (user.matches['postponed'] && user.matches['postponed'].length) {
                     if (!user.matches['postponedUntil'] ||
-                        user.matches['postponedUntil'] >= new Date()) {
+                        (user.matches['postponedUntil'] <= new Date())) {
                         if (!user.matches['pending']) {
                             user.matches['pending'] = [];
                         }
                         user.matches['pending'] = user.matches['pending'].concat(user.matches['postponed']);
-                        user.matches['postponed'] = null;
-                        user.matches['postponedUntil'] = null;
+                        user.matches['postponed'] = [];
+                        user.matches['postponedUntil'] = [];
                         changeFlag = true;
                     }
                 }
@@ -913,7 +978,7 @@ var LHSessionMgr = (function () {
             user.matches[matchType].splice(i, 1);
             if (user.matches[matchType].length == 0) {
                 // could optionally remove this key when saving to DB
-                user.matches[matchType] = null;
+                user.matches[matchType] = [];
             }
             return true;
         }

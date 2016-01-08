@@ -5,12 +5,11 @@ const DB_NAME          = 'UserIdentities';
 const STATE_DATA_DFLT  = {rememberMe : false};
 const USER_MATCH_TYPES = ['pending', 'rejected', 'failed', 'postponed'];
 
+var moment           = require('moment');
+
 var passport         = require('passport');
 var session          = require('express-session');
 var SessionStore     = require('express-session-rethinkdb')(session);
-
-var nonce            = require('nonce')(10);
-var md5              = require('md5');
 
 var FacebookStrategy = require('passport-facebook').Strategy;
 var GoogleStrategy   = require('passport-google-oauth').OAuth2Strategy;
@@ -26,7 +25,7 @@ export class LHSessionMgr {
     hostURL     : string;
     authPath    : string;
     successPath : string;
-    failurePath : string;
+    signinPath  : string;
     mergePath   : string;
 
     dbPort      : number;
@@ -46,7 +45,7 @@ export class LHSessionMgr {
 
         this.authPath    = options.authPath    || "/auth";
         this.successPath = options.successPath || '/';
-        this.failurePath = options.failurePath || this.authPath + '/signin';
+        this.signinPath  = options.signinPath || this.authPath + '/signin';
         this.mergePath   = options.mergePath   || this.authPath + '/merge';
 
         this.dbHost      = options.dbHost      || 'localhost';
@@ -132,6 +131,8 @@ export class LHSessionMgr {
     }
 
     register(app : any) : void {
+        var _this = this;
+
         //
         // Create session store manager
         // See: https://github.com/armenfilipetyan/express-session-rethinkdb
@@ -211,6 +212,51 @@ export class LHSessionMgr {
         if (this.authConfig.google) {
             this._registerRoutes(app, 'google');
         }
+
+        //
+        // Register special merge routes
+        //
+        
+        app.get(this.authPath + '/merge/reject', function(req, res, next) {
+            // Move all pending to rejected
+            
+            if (_this._moveUserMatches(req.user, 'pending', 'rejected')) {
+
+                _this.r.table('users').get(req.user.id).update({
+                    matches : req.user.matches
+                }).run().then(function() {
+                    res.redirect(_this.successPath);
+                }).catch(function(err) {
+                    console.error("LHSessionMgr: failed rejecting user matches with error: ", err);
+                    res.redirect(_this.successPath);
+                });
+            } else {
+                res.redirect(_this.successPath);
+            };
+        })
+
+        app.get(this.authPath + '/merge/postpone', function(req, res, next) {
+            // Move all pending to rejected
+
+            if (_this._moveUserMatches(req.user, 'pending', 'postponed')) {
+
+                var now = moment(new Date());
+                now.add(1, 'day');  // tomorrow
+                req.user.matches['postponedUntil'] = now.toDate();
+
+                _this.r.table('users').get(req.user.id).update({
+                    matches    : req.user.matches
+                }).run().then(function() {
+                    res.redirect(_this.successPath);
+                }).catch(function(err) {
+                    console.error("LHSessionMgr: failed rejecting user matches with error: ", err);
+                    res.redirect(_this.successPath);
+                });
+            } else {
+                res.redirect(_this.successPath);
+            };
+        })
+
     }
 
     signinOptions() : any  {
@@ -236,7 +282,7 @@ export class LHSessionMgr {
 
             if (!req || !req.user || !req.user.matches) {
                 resolve(null);
-		return;
+                return;
             }
 
             var options = {
@@ -248,7 +294,7 @@ export class LHSessionMgr {
             _this._getUserMatchIds(req.user).then(function(pendingUserIds) {
 
                 if (pendingUserIds.length <= 0) {
-		    return (null);
+                    return (null);
                 }
 
                 var pList = [];  
@@ -261,13 +307,13 @@ export class LHSessionMgr {
                     pList.push(_this.getUser(pendingUserIds[i]));
                 }
 
-		return Promise.all(pList);
+                return Promise.all(pList);
 
-	    }).then(function(pendings) {
-		if (!pendings) {
-		    resolve(options);
-		    return;
-		}
+            }).then(function(pendings) {
+                if (!pendings) {
+                    resolve(options);
+                    return;
+                }
 
                 var pendingsDict = {};
                 
@@ -314,10 +360,10 @@ export class LHSessionMgr {
                 return;
             }
 
-	    _this._getUserMatchIds(req.user).then(function(matchedUserIds) {
+            _this._getUserMatchIds(req.user).then(function(matchedUserIds) {
                 resolve(matchedUserIds);
-	    });
-	});
+            });
+        });
     }
 
     getUser(userId:number) {
@@ -467,7 +513,6 @@ export class LHSessionMgr {
         });
     }
 
-
     _registerRoutes(app, provider) {
         var _this = this;
 
@@ -522,7 +567,7 @@ export class LHSessionMgr {
         //   sign in page.  Otherwise, the primary route function function will be called,
         //   which, in this example, will redirect the user to the home page.
 
-        var callbackAuthFn = passport.authenticate(provider, { failureRedirect: _this.failurePath });
+        var callbackAuthFn = passport.authenticate(provider, { failureRedirect: _this.signinPath });
 
         app.get(_this._callbackURL(provider), function(req, res, next) {
             console.log(`Authenticating callback for ${provider}`);
@@ -713,7 +758,8 @@ export class LHSessionMgr {
                             // Update lastSignin 
                             _r.table('authProviders').get(providerIdStr).update({lastSignin : new Date()}).run();
 
-                            // but no need to wait for it
+                            // but no need to wait for this one (not a big deal if there's a race
+			    // condition for this lastSignin date property)
                             return user;
                         } else {
                             // Unable to lookup an existing user, so create a new one
@@ -776,9 +822,9 @@ export class LHSessionMgr {
                 for (j = 0; j < matchedUserIds.length; j++) {
                     matchId = matchedUserIds[j];
 
-		    if (_this._getUserMatchTypesForId(user, matchId).length == 0) {
-			changeFlag = _this._addUserMatch(user, matchId, 'pending');
-		    }
+                    if (_this._getUserMatchTypesForId(user, matchId).length == 0) {
+                        changeFlag = _this._addUserMatch(user, matchId, 'pending');
+                    }
                 }
                 
                 if (!changeFlag) {
@@ -982,7 +1028,7 @@ export class LHSessionMgr {
             // Update srcUser users document to be inactive 
             // and remove this pending from matches, if there
 
-	    _this._removeUserMatch(srcUser, dstUser.id);
+            _this._removeUserMatch(srcUser, dstUser.id);
 
             newProm = _r.table('users').get(srcUser.id).update({
                 active     : false, 
@@ -1021,79 +1067,103 @@ export class LHSessionMgr {
     //
 
     _addUserMatch(user:any, userId:number, matchType:string) : boolean {
-	if ( USER_MATCH_TYPES.indexOf(matchType) == -1) {
-	    console.error("LHSessionMgr:_addUserMatch - invalid match type: ", matchType);
-	    return false;
-	}
+        if ( USER_MATCH_TYPES.indexOf(matchType) == -1) {
+            console.error("LHSessionMgr:_addUserMatch - invalid match type: ", matchType);
+            return false;
+        }
 
-	if (!user.matches) { user.matches = {}; }
+        if (!user.matches) { user.matches = {}; }
 
-	if ( this._listContains(user.matches[matchType], userId) ) {
-	    return false; // nothing to do
-	} else {
-	    if (!user.matches[matchType]) {
-		user.matches[matchType] = [];
-	    }
-	    user.matches[matchType].push(userId);
-	    return true;
-	}
+        if ( this._listContains(user.matches[matchType], userId) ) {
+            return false; // nothing to do
+        } else {
+            if (!user.matches[matchType]) {
+                user.matches[matchType] = [];
+            }
+            user.matches[matchType].push(userId);
+            return true;
+        }
+    }
+
+    _moveUserMatches(user:any, fromType:string, toType:string) : boolean {
+        if ( USER_MATCH_TYPES.indexOf(fromType) == -1) {
+            console.error("LHSessionMgr:_moveUserMatches - invalid from match type: ", fromType);
+            return false;
+        }
+        if ( USER_MATCH_TYPES.indexOf(toType) == -1) {
+            console.error("LHSessionMgr:_moveUserMatches - invalid to match type: ", toType);
+            return false;
+        }
+
+        if (!user.matches) { user.matches = {}; }
+
+        if (! user.matches[fromType] || user.matches[fromType].length <= 0) {
+            return false; // nothing to do
+        } else {
+            if (!user.matches[toType]) {
+                user.matches[toType] = [];
+            }
+            user.matches[toType]   = user.matches[toType].concat(user.matches[fromType]);
+            user.matches[fromType] = [];
+            return true;
+        }
     }
 
     _getUserMatchTypesForId(user:any, userId:number) : Array<string> {
-	if (!user || !user.matches) {
-	    return [];
-	}
+        if (!user || !user.matches) {
+            return [];
+        }
 
-	var res = [];
+        var res = [];
 
         if (this._listContains(user.matches.pending, userId)) {
-	    res.push('pending');
-	}
+            res.push('pending');
+        }
             
-	if (this._listContains(user.matches.rejected,  userId)) {
-	    res.push('rejected');
-	}
+        if (this._listContains(user.matches.rejected,  userId)) {
+            res.push('rejected');
+        }
 
         if (this._listContains(user.matches.postponed, userId)) {
-	    res.push('postponed');
-	}
+            res.push('postponed');
+        }
 
         if (this._listContains(user.matches.failed, userId)) {
-	    res.push('failed');
-	}
+            res.push('failed');
+        }
 
-	return res;
+        return res;
     }
 
     _getUserMatchIds(user:any, options?:any) : Promise<any> {
-	var _this = this;
+        var _this = this;
 
-	if (!options) { options = {}; }
+        if (!options) { options = {}; }
 
-	return new Promise(function(resolve, reject) {
+        return new Promise(function(resolve, reject) {
             if (!user || !user.matches) {
                 resolve([]);
-		return;
+                return;
             }
 
             // Update pendings with postponed if appropriate
 
-	    var changeFlag = false;
+            var changeFlag = false;
 
             if (!options.ignorePostponed) {
-                if (user.matches['postponed']) {
+                if (user.matches['postponed'] && user.matches['postponed'].length) {
                     if (!user.matches['postponedUntil'] || 
- 			 user.matches['postponedUntil'] >= new Date()) {
+                        (user.matches['postponedUntil'] <= new Date())) {
 
-			if (!user.matches['pending']) {
-			    user.matches['pending'] = [];
-			}
-			
-			user.matches['pending']        = user.matches['pending'].concat(user.matches['postponed']);
-			user.matches['postponed']      = null;
-			user.matches['postponedUntil'] = null;
-			
-			changeFlag = true;
+                        if (! user.matches['pending']) {
+                            user.matches['pending'] = [];
+                        }
+                        
+                        user.matches['pending']        = user.matches['pending'].concat(user.matches['postponed']);
+                        user.matches['postponed']      = [];
+                        user.matches['postponedUntil'] = [];
+                        
+                        changeFlag = true;
                     }
                 }
             }
@@ -1106,25 +1176,25 @@ export class LHSessionMgr {
                 matchIds = matchIds.concat(user.matches['pending']);
             }
 
-	    // Get rejected, if appropriate
+            // Get rejected, if appropriate
 
-	    if (options.includeAll || options.includeRejected) {
-		if (user.matches['rejected']) {
+            if (options.includeAll || options.includeRejected) {
+                if (user.matches['rejected']) {
                     matchIds = matchIds.concat(user.matches['rejected']);
-		}
-	    }
+                }
+            }
 
-	    // Get failed, if appropriate
+            // Get failed, if appropriate
 
-	    if (options.includeAll || options.includeFailed) {
-		if (user.matches['failed']) {
+            if (options.includeAll || options.includeFailed) {
+                if (user.matches['failed']) {
                     matchIds = matchIds.concat(user.matches['failed']);
-		}
-	    }
+                }
+            }
 
-	    if (!changeFlag) {
-		resolve(matchIds);
-	    } else {
+            if (!changeFlag) {
+                resolve(matchIds);
+            } else {
                 _this.r.table('users').get(user.id).update({matches : user.matches}).run(function(err, res) {
                     if (err) {
                         console.error(`LHSessionMgr:getUserMatchIds: received error when updating user with matches: `, 
@@ -1132,46 +1202,46 @@ export class LHSessionMgr {
                     }
 
                     resolve(matchIds);
-		});
-	    }
-	});
+                });
+            }
+        });
     }
 
     _removeUserMatch(user:any, otherUserId:number) : boolean {
-	var changeFlag = false;
+        var changeFlag = false;
 
-	changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'pending');
-	changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'rejected');
-	changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'failed');
-	changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'postponed');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'pending');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'rejected');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'failed');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'postponed');
 
-	return changeFlag;
+        return changeFlag;
     }
 
     _removeUserMatchFrom(user:any, otherUserId:number, matchType:string) : boolean {
-	if ( USER_MATCH_TYPES.indexOf(matchType) == -1) {
-	    console.error("LHSessionMgr:_removeUserMatchFrom - invalid match type: ", matchType);
-	    return false;
-	}
+        if ( USER_MATCH_TYPES.indexOf(matchType) == -1) {
+            console.error("LHSessionMgr:_removeUserMatchFrom - invalid match type: ", matchType);
+            return false;
+        }
 
-	if (!user || !user.matches || !user.matches[matchType]) {
-	    return false;
-	}
+        if (!user || !user.matches || !user.matches[matchType]) {
+            return false;
+        }
 
         var i = user.matches[matchType].indexOf(otherUserId)
         if (i > -1) {
             // Remove this element
             user.matches[matchType].splice(i, 1);
 
-	    if (user.matches[matchType].length == 0) {
-		// could optionally remove this key when saving to DB
-		user.matches[matchType] = null;  
-	    }
+            if (user.matches[matchType].length == 0) {
+                // could optionally remove this key when saving to DB
+                user.matches[matchType] = [];  
+            }
 
-	    return true;
+            return true;
         } else {
-	    return false;
-	}
+            return false;
+        }
     }
 
     //
