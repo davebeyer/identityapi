@@ -275,7 +275,7 @@ export class LHSessionMgr {
         return { providers : providers };
     }
 
-    mergeOptions(req) : any {
+    userMergeOptions(req) : any {
         var _this = this;
 
         return new Promise(function(resolve, reject) {
@@ -343,7 +343,7 @@ export class LHSessionMgr {
         req.logout();
     }
 
-    currentUser(req) : boolean {
+    signedInUser(req) : boolean {
         if (req.isAuthenticated()) {
             // TODO: is this the proper way?
             return req['user'];
@@ -351,7 +351,7 @@ export class LHSessionMgr {
         return null;
     }
 
-    pendingUserMatchIds(req) {
+    possibleRedundantUserIds(req) {
         var _this = this;
 
         return new Promise(function(resolve, reject) {

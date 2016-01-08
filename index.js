@@ -199,7 +199,7 @@ var LHSessionMgr = (function () {
         }
         return { providers: providers };
     };
-    LHSessionMgr.prototype.mergeOptions = function (req) {
+    LHSessionMgr.prototype.userMergeOptions = function (req) {
         var _this = this;
         return new Promise(function (resolve, reject) {
             if (!req || !req.user || !req.user.matches) {
@@ -250,14 +250,14 @@ var LHSessionMgr = (function () {
     LHSessionMgr.prototype.signout = function (req) {
         req.logout();
     };
-    LHSessionMgr.prototype.currentUser = function (req) {
+    LHSessionMgr.prototype.signedInUser = function (req) {
         if (req.isAuthenticated()) {
             // TODO: is this the proper way?
             return req['user'];
         }
         return null;
     };
-    LHSessionMgr.prototype.pendingUserMatchIds = function (req) {
+    LHSessionMgr.prototype.possibleRedundantUserIds = function (req) {
         var _this = this;
         return new Promise(function (resolve, reject) {
             if (!req) {
