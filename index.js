@@ -2,6 +2,7 @@
 var FIRST_USERID = 100;
 var DB_NAME = 'UserIdentities';
 var STATE_DATA_DFLT = { rememberMe: false };
+var USER_MATCH_TYPES = ['pending', 'rejected', 'failed', 'postponed'];
 var passport = require('passport');
 var session = require('express-session');
 var SessionStore = require('express-session-rethinkdb')(session);
@@ -32,7 +33,7 @@ var LHSessionMgr = (function () {
             servers: [{ host: this.dbHost, port: this.dbPort }],
             db: DB_NAME
         });
-        if (options.initDatabase) {
+        if (true || options.initDatabase) {
             this._initDB();
         }
         //
@@ -162,30 +163,35 @@ var LHSessionMgr = (function () {
         var _this = this;
         return new Promise(function (resolve, reject) {
             if (!req || !req.user || !req.user.matches) {
-                return null;
-            }
-            var pendingUserIds = req.user.matches.pending;
-            if (!pendingUserIds || pendingUserIds.length <= 0) {
-                return null;
-            }
-            var pList = [];
-            var i, j;
-            // TODO: could consider making this more efficient, but at least for now, 
-            //        get one user at a time (typical case is there will only be a 
-            //        single user to merge)
-            for (i = 0; i < pendingUserIds.length; i++) {
-                pList.push(_this.getUser(pendingUserIds[i]));
+                resolve(null);
+                return;
             }
             var options = {
                 rejectUrl: _this.authPath + '/merge/reject',
                 postponeUrl: _this.authPath + '/merge/postpone',
                 matches: []
             };
-            return Promise.all(pList).then(function (pendings) {
+            _this._getUserMatchIds(req.user).then(function (pendingUserIds) {
+                if (pendingUserIds.length <= 0) {
+                    return (null);
+                }
+                var pList = [];
+                // TODO: could consider making this more efficient, but at least for now, 
+                //        get one user at a time (typical case is there will only be a 
+                //        single user to merge)
+                for (var i = 0; i < pendingUserIds.length; i++) {
+                    pList.push(_this.getUser(pendingUserIds[i]));
+                }
+                return Promise.all(pList);
+            }).then(function (pendings) {
+                if (!pendings) {
+                    resolve(options);
+                    return;
+                }
                 var pendingsDict = {};
-                for (i = 0; i < pendings.length; i++) {
+                for (var i = 0; i < pendings.length; i++) {
                     var providerInfo = pendings[i].providerInfo ? pendings[i].providerInfo : [];
-                    for (j = 0; j < providerInfo.length; j++) {
+                    for (var j = 0; j < providerInfo.length; j++) {
                         var infoId = providerInfo[j].id;
                         if (!(infoId in pendingsDict)) {
                             providerInfo[j]['mergeUrl'] = _this.authPath + '/merge/' + providerInfo[j].provider + '?uid=' + providerInfo[j].userId;
@@ -196,7 +202,7 @@ var LHSessionMgr = (function () {
                 }
                 resolve(options);
             }).catch(function (err) {
-                console.error("mergeOptions: failed to get matching users with error: ", err);
+                console.error("LHSessionMgr:mergeOptions - failed to get matching users with error: ", err);
                 resolve(options); // return with no match options (to allow user to skip/reject)
             });
         });
@@ -211,42 +217,16 @@ var LHSessionMgr = (function () {
         }
         return null;
     };
-    LHSessionMgr.prototype.pendingMatches = function (req) {
+    LHSessionMgr.prototype.pendingUserMatchIds = function (req) {
         var _this = this;
         return new Promise(function (resolve, reject) {
-            if (!req || !req.user || !req.user.matches) {
+            if (!req) {
                 resolve([]);
                 return;
             }
-            var changeFlag = false;
-            var matches = req.user.matches;
-            var matchedUserIds = [];
-            if (matches.pending && matches.pending.length > 0) {
-                matchedUserIds = matches.pending;
-            }
-            if (matches.postponed && matches.postponed.length > 0) {
-                if (matches.postponedUntil >= new Date()) {
-                    // Add to matchedUserIds 
-                    matchedUserIds = matchedUserIds.concat(matches.postponed);
-                    // Update user record
-                    req.user.matches.pending = matchedUserIds;
-                    req.user.matches.postponed = null;
-                    req.user.matches.postponedUntil = null;
-                    // Mark to update database.
-                    changeFlag = true;
-                }
-            }
-            if (!changeFlag) {
+            _this._getUserMatchIds(req.user).then(function (matchedUserIds) {
                 resolve(matchedUserIds);
-            }
-            else {
-                _this.r.table('users').get(req.user.id).update({ matches: req.user.matches }).run(function (err, res) {
-                    if (err) {
-                        console.error("pendingMatches: received error when updating user with matches: ", req.user.id, req.user);
-                    }
-                    resolve(matchedUserIds);
-                });
-            }
+            });
         });
     };
     LHSessionMgr.prototype.getUser = function (userId) {
@@ -619,15 +599,8 @@ var LHSessionMgr = (function () {
                 }
                 for (j = 0; j < matchedUserIds.length; j++) {
                     matchId = matchedUserIds[j];
-                    if (!_this._listContains(user.matches.pending, matchId) &&
-                        !_this._listContains(user.matches.rejected, matchId) &&
-                        !_this._listContains(user.matches.postponed, matchId) &&
-                        !_this._listContains(user.matches.failed, matchId)) {
-                        if (!user.matches.pending) {
-                            user.matches.pending = [];
-                        }
-                        user.matches.pending.push(matchId);
-                        changeFlag = true;
+                    if (_this._getUserMatchTypesForId(user, matchId).length == 0) {
+                        changeFlag = _this._addUserMatch(user, matchId, 'pending');
                     }
                 }
                 if (!changeFlag) {
@@ -796,13 +769,7 @@ var LHSessionMgr = (function () {
             _this._consolidateProviderInfo(dstUser);
             // Update srcUser users document to be inactive 
             // and remove this pending from matches, if there
-            if (srcUser.matches && srcUser.matches.pending) {
-                i = srcUser.matches.pending.indexOf(dstUser.id);
-                if (i > -1) {
-                    // Remove this element
-                    srcUser.matches.pending.splice(i, 1);
-                }
-            }
+            _this._removeUserMatch(srcUser, dstUser.id);
             newProm = _r.table('users').get(srcUser.id).update({
                 active: false,
                 merged: new Date(),
@@ -811,16 +778,11 @@ var LHSessionMgr = (function () {
             }).run();
             pList.push(newProm);
             // Update dstUser users document to remove this pending, if there
-            if (dstUser.matches && dstUser.matches.pending) {
-                i = dstUser.matches.pending.indexOf(srcUser.id);
-                if (i > -1) {
-                    // Remove this element
-                    dstUser.matches.pending.splice(i, 1);
-                    newProm = _r.table('users').get(dstUser.id).update({
-                        matches: dstUser.matches
-                    }).run();
-                    pList.push(newProm);
-                }
+            if (_this._removeUserMatch(dstUser, srcUser.id)) {
+                newProm = _r.table('users').get(dstUser.id).update({
+                    matches: dstUser.matches
+                }).run();
+                pList.push(newProm);
             }
             // Wait for all of above to complete
             Promise.all(pList).then(function (results) {
@@ -833,7 +795,134 @@ var LHSessionMgr = (function () {
         });
     };
     //
-    // Convenience methods
+    // User match convenience methods
+    //
+    LHSessionMgr.prototype._addUserMatch = function (user, userId, matchType) {
+        if (USER_MATCH_TYPES.indexOf(matchType) == -1) {
+            console.error("LHSessionMgr:_addUserMatch - invalid match type: ", matchType);
+            return false;
+        }
+        if (!user.matches) {
+            user.matches = {};
+        }
+        if (this._listContains(user.matches[matchType], userId)) {
+            return false; // nothing to do
+        }
+        else {
+            if (!user.matches[matchType]) {
+                user.matches[matchType] = [];
+            }
+            user.matches[matchType].push(userId);
+            return true;
+        }
+    };
+    LHSessionMgr.prototype._getUserMatchTypesForId = function (user, userId) {
+        if (!user || !user.matches) {
+            return [];
+        }
+        var res = [];
+        if (this._listContains(user.matches.pending, userId)) {
+            res.push('pending');
+        }
+        if (this._listContains(user.matches.rejected, userId)) {
+            res.push('rejected');
+        }
+        if (this._listContains(user.matches.postponed, userId)) {
+            res.push('postponed');
+        }
+        if (this._listContains(user.matches.failed, userId)) {
+            res.push('failed');
+        }
+        return res;
+    };
+    LHSessionMgr.prototype._getUserMatchIds = function (user, options) {
+        var _this = this;
+        if (!options) {
+            options = {};
+        }
+        return new Promise(function (resolve, reject) {
+            if (!user || !user.matches) {
+                resolve([]);
+                return;
+            }
+            // Update pendings with postponed if appropriate
+            var changeFlag = false;
+            if (!options.ignorePostponed) {
+                if (user.matches['postponed']) {
+                    if (!user.matches['postponedUntil'] ||
+                        user.matches['postponedUntil'] >= new Date()) {
+                        if (!user.matches['pending']) {
+                            user.matches['pending'] = [];
+                        }
+                        user.matches['pending'] = user.matches['pending'].concat(user.matches['postponed']);
+                        user.matches['postponed'] = null;
+                        user.matches['postponedUntil'] = null;
+                        changeFlag = true;
+                    }
+                }
+            }
+            var matchIds = [];
+            // Get pendings
+            if (user.matches['pending']) {
+                matchIds = matchIds.concat(user.matches['pending']);
+            }
+            // Get rejected, if appropriate
+            if (options.includeAll || options.includeRejected) {
+                if (user.matches['rejected']) {
+                    matchIds = matchIds.concat(user.matches['rejected']);
+                }
+            }
+            // Get failed, if appropriate
+            if (options.includeAll || options.includeFailed) {
+                if (user.matches['failed']) {
+                    matchIds = matchIds.concat(user.matches['failed']);
+                }
+            }
+            if (!changeFlag) {
+                resolve(matchIds);
+            }
+            else {
+                _this.r.table('users').get(user.id).update({ matches: user.matches }).run(function (err, res) {
+                    if (err) {
+                        console.error("LHSessionMgr:getUserMatchIds: received error when updating user with matches: ", user.id, user);
+                    }
+                    resolve(matchIds);
+                });
+            }
+        });
+    };
+    LHSessionMgr.prototype._removeUserMatch = function (user, otherUserId) {
+        var changeFlag = false;
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'pending');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'rejected');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'failed');
+        changeFlag = changeFlag || this._removeUserMatchFrom(user, otherUserId, 'postponed');
+        return changeFlag;
+    };
+    LHSessionMgr.prototype._removeUserMatchFrom = function (user, otherUserId, matchType) {
+        if (USER_MATCH_TYPES.indexOf(matchType) == -1) {
+            console.error("LHSessionMgr:_removeUserMatchFrom - invalid match type: ", matchType);
+            return false;
+        }
+        if (!user || !user.matches || !user.matches[matchType]) {
+            return false;
+        }
+        var i = user.matches[matchType].indexOf(otherUserId);
+        if (i > -1) {
+            // Remove this element
+            user.matches[matchType].splice(i, 1);
+            if (user.matches[matchType].length == 0) {
+                // could optionally remove this key when saving to DB
+                user.matches[matchType] = null;
+            }
+            return true;
+        }
+        else {
+            return false;
+        }
+    };
+    //
+    // Miscellaneous convenience methods
     //
     LHSessionMgr.prototype._listContains = function (itemList, item, options) {
         if (!itemList) {
