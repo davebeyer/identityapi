@@ -60,7 +60,7 @@ export class LHSessionMgr {
             db      : DB_NAME
         }); 
 
-        if (options.initDatabase) {
+        if (true || options.initDatabase) {
             this._initDB();
         }
 
@@ -366,7 +366,7 @@ export class LHSessionMgr {
         });
     }
 
-    getUser(userId:number) {
+    getUser(userId:number) : any {
         var _this = this;
         var _r    = this.r;
 
@@ -759,7 +759,7 @@ export class LHSessionMgr {
                             _r.table('authProviders').get(providerIdStr).update({lastSignin : new Date()}).run();
 
                             // but no need to wait for this one (not a big deal if there's a race
-			    // condition for this lastSignin date property)
+                            // condition for this lastSignin date property)
                             return user;
                         } else {
                             // Unable to lookup an existing user, so create a new one
@@ -819,14 +819,25 @@ export class LHSessionMgr {
                     user.matches = {};
                 }
 
-		// TODO: ADD PENDING TO OTHER USER DOC TOO!
-
                 for (j = 0; j < matchedUserIds.length; j++) {
                     matchId = matchedUserIds[j];
 
                     if (_this._getUserMatchTypesForId(user, matchId).length == 0) {
                         changeFlag = _this._addUserMatch(user, matchId, 'pending');
                     }
+
+                    // Initiate update for other user to add this user as a pending match
+                    // there too.  (Note that we're not waiting for these updates, only kicking
+                    // off the updates, since race condition appears unlikely for other users,
+                    // and downside of losing this updates on the matches field isn't terrible.)
+
+                    _this.getUser(matchId).then(function(otherUser) {
+                        if (_this._addUserMatch(otherUser, user.id, 'pending')) {
+                            _this.r.table('users').get(otherUser.id).update({matches : otherUser.matches}).run();
+                        }
+                    }).catch(function(err) {
+                        console.error("LHSessionMgr:_attachUserMatches - unable to update matched users");
+                    });
                 }
                 
                 if (!changeFlag) {
