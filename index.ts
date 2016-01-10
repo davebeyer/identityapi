@@ -60,7 +60,7 @@ export class LHSessionMgr {
             db      : DB_NAME
         }); 
 
-        if (true || options.initDatabase) {
+        if (options.initDatabase) {
             this._initDB();
         }
 
@@ -438,8 +438,14 @@ export class LHSessionMgr {
             return _r.table('users').insert({
                 id           : 99,
                 created      : new Date(),
-                active       : true
+                active       : true,
+		mergedInto   : 0    // invalid userId, just to be sure index is created
             });
+
+        }).finally(function() {
+	    // Create mergedInto index so we can quickly get the full history of a user 
+            console.log("initDB: About to create mergedIntoIndex");
+            return _r.table('users').indexCreate('mergedIntoIndex', _r.row('mergedInto')).run();
 
         }).finally(function() {
             console.log("initDB: About to create authState table");
