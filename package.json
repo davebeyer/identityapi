@@ -19,6 +19,7 @@
     "passport": "^0.2.1",
     "passport-facebook": "^2.0.0",
     "passport-google-oauth": "^0.2.0",
-    "rethinkdbdash": "^2.2.15"
+    "rethinkdbdash": "^2.2.15",
+    "tsd": "^0.6.5"
   }
 }
